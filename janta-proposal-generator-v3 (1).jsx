@@ -80,6 +80,23 @@ const REGIONS = {
 /** Janta tower increments — system kW is always an integer multiple of this value. */
 const SYSTEM_SIZE_STEP_KW = 5.4;
 
+function snapSystemSizeKw(kw) {
+  if (!Number.isFinite(kw) || kw <= 0) return SYSTEM_SIZE_STEP_KW;
+  const steps = Math.max(1, Math.round(kw / SYSTEM_SIZE_STEP_KW));
+  return Math.round(steps * SYSTEM_SIZE_STEP_KW * 10) / 10;
+}
+
+/** Catalog suggestions (datalist). Choosing an exact label fills suggested cost; both name and $ stay editable. */
+const BATTERY_PRESETS = [
+  { label: "Tesla Powerwall 2 (13.5 kWh)", cost: 11500 },
+  { label: "Enphase IQ Battery 5P", cost: 12000 },
+  { label: "Generac PWRcell (17.1 kWh)", cost: 14000 },
+];
+const GENERATOR_PRESETS = [
+  { label: "Standby ~22 kW", cost: 6500 },
+  { label: "Portable 7.5–9 kW", cost: 1200 },
+];
+
 const STATE_TO_REGION = {
   IL: "illinois",
   CA: "california",
@@ -539,6 +556,28 @@ const C = {
 const fontSans = "'Inter', system-ui, -apple-system, sans-serif";
 const fontSerif = "'Inter', system-ui, -apple-system, sans-serif";
 
+function systemSizeStepControlStyle(pressed) {
+  return {
+    width: 30,
+    height: 30,
+    borderRadius: 6,
+    border: `1px solid ${C.g200}`,
+    background: pressed ? C.blue : C.g300,
+    color: C.white,
+    fontSize: 18,
+    fontWeight: 700,
+    lineHeight: 1,
+    padding: 0,
+    fontFamily: fontSans,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    cursor: pressed ? "pointer" : "default",
+    opacity: pressed ? 1 : 0.45,
+  };
+}
+
 function Pill({ children, active, onClick }) {
   return <button onClick={onClick} style={{
     padding: "8px 18px", borderRadius: 14, border: `1px solid ${active ? C.blue : C.g200}`,
@@ -548,23 +587,40 @@ function Pill({ children, active, onClick }) {
   }}>{children}</button>;
 }
 
-function Field({ label, value, onChange, type = "text", unit, placeholder, disabled, wide, rows }) {
+function Field({ label, value, onChange, type = "text", unit, placeholder, disabled, wide, rows, endSlot, shrink, list }) {
   const El = rows ? "textarea" : "input";
+  const inputRow = (
+    <>
+      <El type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        disabled={disabled} rows={rows} list={!rows && list ? list : undefined}
+        style={{
+          flex: 1, minWidth: shrink ? 0 : undefined, padding: rows ? 10 : "8px 10px", background: disabled ? C.g100 : C.cream,
+          border: `1px solid ${C.g200}`, borderRadius: unit ? "8px 0 0 8px" : 8,
+          color: C.g700, fontSize: 13, outline: "none", fontFamily: rows ? "monospace" : fontSans,
+          resize: rows ? "vertical" : undefined, boxSizing: "border-box", width: "100%",
+        }}
+      />
+      {unit && <div style={{ padding: "8px 8px", background: C.g100, color: C.g500, fontSize: 11, borderRadius: "0 8px 8px 0", border: `1px solid ${C.g200}`, borderLeft: "none", fontFamily: fontSans, whiteSpace: "nowrap", display: "flex", alignItems: "center" }}>{unit}</div>}
+    </>
+  );
   return (
-    <div style={{ marginBottom: 8, flex: wide ? "1 1 100%" : "1 1 auto", minWidth: wide ? "100%" : 140 }}>
+    <div style={{
+      marginBottom: 8,
+      flex: wide ? "1 1 100%" : "1 1 auto",
+      minWidth: wide ? "100%" : shrink ? 0 : 140,
+      width: shrink ? "100%" : undefined,
+      maxWidth: shrink ? "100%" : undefined,
+    }}
+    >
       {label && <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>{label}</label>}
-      <div style={{ display: "flex" }}>
-        <El type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-          disabled={disabled} rows={rows}
-          style={{
-            flex: 1, padding: rows ? 10 : "8px 10px", background: disabled ? C.g100 : C.cream,
-            border: `1px solid ${C.g200}`, borderRadius: unit ? "8px 0 0 8px" : 8,
-            color: C.g700, fontSize: 13, outline: "none", fontFamily: rows ? "monospace" : fontSans,
-            resize: rows ? "vertical" : undefined, boxSizing: "border-box", width: "100%",
-          }}
-        />
-        {unit && <div style={{ padding: "8px 8px", background: C.g100, color: C.g500, fontSize: 11, borderRadius: "0 8px 8px 0", border: `1px solid ${C.g200}`, borderLeft: "none", fontFamily: fontSans, whiteSpace: "nowrap", display: "flex", alignItems: "center" }}>{unit}</div>}
-      </div>
+      {endSlot ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", flex: 1, minWidth: 0 }}>{inputRow}</div>
+          {endSlot}
+        </div>
+      ) : (
+        <div style={{ display: "flex", minWidth: shrink ? 0 : undefined }}>{inputRow}</div>
+      )}
     </div>
   );
 }
@@ -777,9 +833,13 @@ export default function JantaProposal() {
 
   // ── Region & System ──
   const [region, setRegion] = useState("illinois");
-  /** Integer count of SYSTEM_SIZE_STEP_KW (min 1 → 5.4 kW). */
-  const [systemStepIndex, setSystemStepIndex] = useState(1);
+  /** Empty = auto (~60% offset); otherwise kW string, snapped to 5.4 kW steps for math. */
+  const [systemSizeKw, setSystemSizeKw] = useState("");
   const [pricingPerKW, setPricingPerKW] = useState(String(DEFAULT_PRICING_PER_KW));
+  const [batteryName, setBatteryName] = useState("");
+  const [batteryCost, setBatteryCost] = useState("");
+  const [generatorName, setGeneratorName] = useState("");
+  const [generatorCost, setGeneratorCost] = useState("");
 
   // ── NREL PVWatts (SAM-style) API ──
   const [useNrelApi, setUseNrelApi] = useState(false);
@@ -813,6 +873,7 @@ export default function JantaProposal() {
   const [extraCreditAmt, setExtraCreditAmt] = useState("");
   const [extraCredits, setExtraCredits] = useState([]);
   const [removedCreditKeys, setRemovedCreditKeys] = useState({});
+  const [stateIncentivesExpanded, setStateIncentivesExpanded] = useState(false);
 
   // ── Shadow ──
   const [obstH, setObstH] = useState("8");
@@ -839,6 +900,10 @@ export default function JantaProposal() {
     });
     if (detectedState && detectedState !== selState) setSelState(detectedState);
   }, [custAddress, siteAddress, utilityName, selState, stateManuallySet]);
+
+  useEffect(() => {
+    setStateIncentivesExpanded(false);
+  }, [selState]);
 
   // Fetch NREL PVWatts when API is on and we have a location (address coords or region)
   useEffect(() => {
@@ -1026,12 +1091,20 @@ export default function JantaProposal() {
     return Math.max(1, Math.round(targetKw / SYSTEM_SIZE_STEP_KW));
   }, [annualKWh, effectiveAnnualPerKW]);
 
-  useEffect(() => {
-    setSystemStepIndex(optimalSystemStep);
-  }, [optimalSystemStep]);
-
-  const effectiveSize = Math.round(systemStepIndex * SYSTEM_SIZE_STEP_KW * 10) / 10;
+  const optimalSystemKw = Math.round(optimalSystemStep * SYSTEM_SIZE_STEP_KW * 10) / 10;
+  const effectiveSize = useMemo(() => {
+    const t = String(systemSizeKw).trim();
+    const p = parseFloat(t.replace(/kw/gi, "").replace(/,/g, ""));
+    if (t === "") return optimalSystemKw;
+    if (Number.isFinite(p)) return snapSystemSizeKw(p);
+    return optimalSystemKw;
+  }, [systemSizeKw, optimalSystemKw]);
+  const systemSizeAtMinStep = effectiveSize <= SYSTEM_SIZE_STEP_KW + 0.001;
   const costPerKW = parseFloat(pricingPerKW) > 0 ? parseFloat(pricingPerKW) : DEFAULT_PRICING_PER_KW;
+  const batteryAdd = Math.max(0, parseFloat(String(batteryCost).replace(/,/g, "")) || 0);
+  const generatorAdd = Math.max(0, parseFloat(String(generatorCost).replace(/,/g, "")) || 0);
+  const solarGross = effectiveSize * costPerKW;
+  const grossCost = solarGross + batteryAdd + generatorAdd;
   const monthlyProd = effectiveMonthlyPerKW.map((m) => Math.round(m * effectiveSize));
   const annualProdRaw = effectiveAnnualPerKW * effectiveSize;
   const annualProd = Math.round(annualProdRaw);
@@ -1039,7 +1112,6 @@ export default function JantaProposal() {
   const offsetPct = requiredKwForFullOffset > 0 ? Math.min((effectiveSize / requiredKwForFullOffset) * 100, 200) : 0;
   const rate = parseFloat(ratePerKWh) || 0.12;
   const annualSavings = Math.min(annualProd, annualKWh) * rate;
-  const grossCost = effectiveSize * costPerKW;
 
   // Credits - auto-populated from state
   const stInc = STATE_INCENTIVES[selState] || STATE_INCENTIVES.IL;
@@ -1069,6 +1141,18 @@ export default function JantaProposal() {
 
   const totalCredits = activeCreditItems.reduce((sum, item) => sum + (item.amount || 0), 0);
   const netCost = grossCost - totalCredits;
+
+  const itcCreditRemoved = !!removedCreditKeys.itc;
+  const ecCreditRemoved = !!removedCreditKeys.energyCommunity;
+
+  function clearRemovedCreditKey(key) {
+    setRemovedCreditKeys((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }
 
   function addExtraCredit() {
     const amount = parseFloat(extraCreditAmt);
@@ -1346,9 +1430,6 @@ export default function JantaProposal() {
                     <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.blue }} />
                     {REGIONS[region]?.label || "Illinois"}
                   </div>
-                  <div style={{ marginTop: 6, color: C.g500, fontSize: 11, fontFamily: fontSans }}>
-                    Based on service address, ZIP code, and coordinates when available.
-                  </div>
                   <div style={{ marginTop: 8 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                       <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>
@@ -1425,76 +1506,56 @@ export default function JantaProposal() {
                     </>
                   )}
                 </div>
-                <div style={{ marginBottom: 10 }}>
-                  <Field
-                    label="Project Pricing"
-                    value={pricingPerKW}
-                    onChange={setPricingPerKW}
-                    type="number"
-                    unit="$/kW"
-                    placeholder="3000"
-                  />
-                </div>
-
                 <div style={{ marginBottom: 10, background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 10, padding: 12 }}>
                   <div style={{ color: C.g500, fontSize: 10, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>System Summary</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <button
-                      type="button"
-                      aria-label="Decrease system size by one step"
-                      onClick={() => setSystemStepIndex((n) => Math.max(1, n - 1))}
-                      style={{
-                        width: 40,
-                        height: 40,
-                        borderRadius: 8,
-                        border: `1px solid ${C.g200}`,
-                        background: C.white,
-                        color: C.navy,
-                        fontSize: 22,
-                        fontWeight: 700,
-                        cursor: systemStepIndex <= 1 ? "default" : "pointer",
-                        opacity: systemStepIndex <= 1 ? 0.35 : 1,
-                        lineHeight: 1,
-                        padding: 0,
-                        flexShrink: 0,
-                      }}
-                      disabled={systemStepIndex <= 1}
-                    >
-                      −
-                    </button>
-                    <div style={{ flex: 1, textAlign: "center", color: C.navy, fontSize: 22, fontWeight: 700, fontFamily: fontSerif, lineHeight: 1.1 }}>
-                      {effectiveSize.toFixed(1)} kW
-                    </div>
-                    <button
-                      type="button"
-                      aria-label="Increase system size by one step"
-                      onClick={() => setSystemStepIndex((n) => n + 1)}
-                      style={{
-                        width: 40,
-                        height: 40,
-                        borderRadius: 8,
-                        border: `1px solid ${C.g200}`,
-                        background: C.white,
-                        color: C.navy,
-                        fontSize: 22,
-                        fontWeight: 700,
-                        cursor: "pointer",
-                        lineHeight: 1,
-                        padding: 0,
-                        flexShrink: 0,
-                      }}
-                    >
-                      +
-                    </button>
-                  </div>
                   <div style={{ marginTop: 4, color: offsetPct >= 80 ? C.green : C.gold, fontSize: 13, fontWeight: 600, fontFamily: fontSans }}>
                     Offset: {offsetPct.toFixed(0)}%
                   </div>
-                  {annualKWh > 0 && effectiveAnnualPerKW > 0 && (
+                  <div style={{ marginTop: 10 }}>
+                    <Field
+                      label="System size (kW)"
+                      value={systemSizeKw}
+                      onChange={setSystemSizeKw}
+                      type="text"
+                      unit="kW"
+                      placeholder={annualKWh > 0 && effectiveAnnualPerKW > 0 ? optimalSystemKw.toFixed(1) : String(SYSTEM_SIZE_STEP_KW)}
+                      endSlot={
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                          <button
+                            type="button"
+                            disabled={systemSizeAtMinStep}
+                            onClick={() => {
+                              const next = Math.max(
+                                SYSTEM_SIZE_STEP_KW,
+                                Math.round((effectiveSize - SYSTEM_SIZE_STEP_KW) * 10) / 10
+                              );
+                              setSystemSizeKw(String(next));
+                            }}
+                            aria-label={`Subtract ${SYSTEM_SIZE_STEP_KW} kW`}
+                            title={`−${SYSTEM_SIZE_STEP_KW} kW`}
+                            style={systemSizeStepControlStyle(!systemSizeAtMinStep)}
+                          >
+                            −
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = Math.round((effectiveSize + SYSTEM_SIZE_STEP_KW) * 10) / 10;
+                              setSystemSizeKw(String(next));
+                            }}
+                            aria-label={`Add ${SYSTEM_SIZE_STEP_KW} kW`}
+                            title={`+${SYSTEM_SIZE_STEP_KW} kW`}
+                            style={systemSizeStepControlStyle(true)}
+                          >
+                            +
+                          </button>
+                        </div>
+                      }
+                    />
                     <div style={{ marginTop: 4, color: C.g500, fontSize: 10, fontFamily: fontSans }}>
-                      Automatically picks the system size step closest to ~60% offset.
+                      Defaults to ~60% offset: Increases in {SYSTEM_SIZE_STEP_KW} kW steps.
                     </div>
-                  )}
+                  </div>
                   <div style={{ marginTop: 10 }}>
                     <Field
                       label="Capacity factor (%)"
@@ -1504,10 +1565,131 @@ export default function JantaProposal() {
                       unit="%"
                       placeholder={baseCF != null ? (baseCF * 100).toFixed(1) : "—"}
                     />
-                    <div style={{ marginTop: 4, color: C.g500, fontSize: 10, fontFamily: fontSans }}>
-                      Leave blank to use {samData ? "NREL PVWatts" : "regional default"} ({(baseCF * 100).toFixed(1)}%). Enter a value to override production and offset math.
-                    </div>
                   </div>
+                </div>
+                <div style={{ marginBottom: 10, padding: 10, background: C.g100, borderRadius: 8, border: `1px solid ${C.g200}` }}>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
+                      gap: 8,
+                      alignItems: "center",
+                      marginBottom: 4,
+                    }}
+                  >
+                    <Field
+                      label="Battery storage"
+                      value={batteryName}
+                      onChange={(v) => {
+                        setBatteryName(v);
+                        if (!v.trim()) {
+                          setBatteryCost("");
+                          return;
+                        }
+                        const hit = BATTERY_PRESETS.find((p) => p.label === v);
+                        if (hit?.cost != null) setBatteryCost(String(hit.cost));
+                      }}
+                      placeholder="Type or select…"
+                      shrink
+                      list="janta-battery-presets"
+                    />
+                    <Field label="Amount" value={batteryCost} onChange={setBatteryCost} type="number" unit="$" placeholder="0" shrink />
+                    <button
+                      type="button"
+                      onClick={() => { setBatteryName(""); setBatteryCost(""); }}
+                      disabled={!batteryName.trim() && !String(batteryCost).trim()}
+                      aria-label="Clear battery"
+                      title="Clear battery"
+                      style={{
+                        flexShrink: 0,
+                        alignSelf: "center",
+                        width: 28,
+                        height: 28,
+                        border: "none",
+                        background: "transparent",
+                        color: batteryName.trim() || String(batteryCost).trim() ? "#2f3e4d" : C.g300,
+                        fontSize: 20,
+                        fontWeight: 600,
+                        lineHeight: 1,
+                        padding: 0,
+                        cursor: batteryName.trim() || String(batteryCost).trim() ? "pointer" : "not-allowed",
+                        fontFamily: fontSans,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        opacity: batteryName.trim() || String(batteryCost).trim() ? 1 : 0.4,
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
+                      gap: 8,
+                      alignItems: "center",
+                      marginBottom: 0,
+                    }}
+                  >
+                    <Field
+                      label="Generator"
+                      value={generatorName}
+                      onChange={(v) => {
+                        setGeneratorName(v);
+                        if (!v.trim()) {
+                          setGeneratorCost("");
+                          return;
+                        }
+                        const hit = GENERATOR_PRESETS.find((p) => p.label === v);
+                        if (hit?.cost != null) setGeneratorCost(String(hit.cost));
+                      }}
+                      placeholder="Type or select…"
+                      shrink
+                      list="janta-generator-presets"
+                    />
+                    <Field label="Amount" value={generatorCost} onChange={setGeneratorCost} type="number" unit="$" placeholder="0" shrink />
+                    <button
+                      type="button"
+                      onClick={() => { setGeneratorName(""); setGeneratorCost(""); }}
+                      disabled={!generatorName.trim() && !String(generatorCost).trim()}
+                      aria-label="Clear generator"
+                      title="Clear generator"
+                      style={{
+                        flexShrink: 0,
+                        alignSelf: "center",
+                        width: 28,
+                        height: 28,
+                        border: "none",
+                        background: "transparent",
+                        color: generatorName.trim() || String(generatorCost).trim() ? "#2f3e4d" : C.g300,
+                        fontSize: 20,
+                        fontWeight: 600,
+                        lineHeight: 1,
+                        padding: 0,
+                        cursor: generatorName.trim() || String(generatorCost).trim() ? "pointer" : "not-allowed",
+                        fontFamily: fontSans,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        opacity: generatorName.trim() || String(generatorCost).trim() ? 1 : 0.4,
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <datalist id="janta-battery-presets">
+                    <option value="">None</option>
+                    {BATTERY_PRESETS.map((p) => (
+                      <option key={p.label} value={p.label} />
+                    ))}
+                  </datalist>
+                  <datalist id="janta-generator-presets">
+                    <option value="">None</option>
+                    {GENERATOR_PRESETS.map((p) => (
+                      <option key={p.label} value={p.label} />
+                    ))}
+                  </datalist>
                 </div>
               </div>
 
@@ -1516,11 +1698,48 @@ export default function JantaProposal() {
                   <div style={{ width: 4, height: 18, background: C.green, borderRadius: 2 }} />
                   <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.navy }}>Credits & Incentives</h3>
                 </div>
-                {/* State info box */}
+                <div style={{ marginBottom: 12 }}>
+                  <Field
+                    label="Project Pricing"
+                    value={pricingPerKW}
+                    onChange={setPricingPerKW}
+                    type="number"
+                    unit="$/kW"
+                    placeholder="3000"
+                  />
+                </div>
+                {/* State info box — tags always; full notes on demand */}
                 <div style={{ background: "#F0F7FF", border: "1px solid #D0E3FF", borderRadius: 6, padding: 10, marginBottom: 10, fontSize: 11, color: C.g700, fontFamily: fontSans, lineHeight: 1.5 }}>
-                  <div style={{ fontWeight: 600, color: C.navy, marginBottom: 3 }}>{stInc.name} Incentives</div>
-                  {stInc.notes}
-                  <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    id="state-incentives-toggle"
+                    aria-expanded={stateIncentivesExpanded}
+                    aria-controls="state-incentives-notes"
+                    onClick={() => setStateIncentivesExpanded((v) => !v)}
+                    style={{
+                      display: "flex",
+                      width: "100%",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 8,
+                      padding: 0,
+                      margin: 0,
+                      border: "none",
+                      background: "transparent",
+                      cursor: "pointer",
+                      fontFamily: fontSans,
+                      textAlign: "left",
+                    }}
+                  >
+                    <span style={{ fontWeight: 600, color: C.navy, fontSize: 12 }}>{stInc.name} Incentives</span>
+                    <span style={{ fontSize: 10, color: C.blue, fontWeight: 600, flexShrink: 0 }}>{stateIncentivesExpanded ? "Hide" : "Details"}</span>
+                  </button>
+                  {stateIncentivesExpanded && (
+                    <div id="state-incentives-notes" role="region" aria-labelledby="state-incentives-toggle" style={{ marginTop: 8, color: C.g700, lineHeight: 1.5 }}>
+                      {stInc.notes}
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
                     {stInc.propExempt && <span style={{ fontSize: 9, background: "#E8F5EC", color: C.green, padding: "2px 6px", borderRadius: 8 }}>Property Tax Exempt</span>}
                     {stInc.salesExempt && <span style={{ fontSize: 9, background: "#E8F5EC", color: C.green, padding: "2px 6px", borderRadius: 8 }}>Sales Tax Exempt</span>}
                     {stInc.srec && <span style={{ fontSize: 9, background: "#FFF8E8", color: "#A07C1C", padding: "2px 6px", borderRadius: 8 }}>SREC: ${stInc.srec.perMWh}/MWh</span>}
@@ -1534,22 +1753,60 @@ export default function JantaProposal() {
                   <div style={{ marginBottom: 6 }}>
                     <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", fontFamily: fontSans }}>Federal ITC (Section 48E)</label>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-                      {[0, 30].map(r => (
-                        <Pill key={r} active={itcPct === r} onClick={() => setItcPct(r)}>{r === 0 ? "None" : `${r}%`}</Pill>
+                      {[0, 30].map((r) => (
+                        <Pill
+                          key={r}
+                          active={r === 0 ? itcPct === 0 || itcCreditRemoved : itcPct === r && !itcCreditRemoved}
+                          onClick={() => {
+                            setItcPct(r);
+                            clearRemovedCreditKey("itc");
+                          }}
+                        >
+                          {r === 0 ? "None" : `${r}%`}
+                        </Pill>
                       ))}
                     </div>
                   </div>
                 </div>
 
-                <Toggle label="Energy Community Bonus (+10%)" checked={ecOn} onChange={setEcOn} />
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ marginBottom: 6 }}>
+                    <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", fontFamily: fontSans }}>Energy Community Bonus (+10%)</label>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                      <Pill
+                        active={!ecOn || ecCreditRemoved}
+                        onClick={() => {
+                          setEcOn(false);
+                          clearRemovedCreditKey("energyCommunity");
+                        }}
+                      >
+                        None
+                      </Pill>
+                      <Pill
+                        active={ecOn && !ecCreditRemoved}
+                        onClick={() => {
+                          setEcOn(true);
+                          clearRemovedCreditKey("energyCommunity");
+                        }}
+                      >
+                        +10%
+                      </Pill>
+                    </div>
+                  </div>
+                </div>
 
-                <div style={{ display: "flex", gap: 8, marginTop: 6, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 8 }}>
-                  <div style={{ flex: "1 1 0", maxWidth: 200, minWidth: 0 }}>
-                    <Field label="Other Credit" value={extraCreditName} onChange={setExtraCreditName} placeholder="Name" />
-                  </div>
-                  <div style={{ flex: "0 0 158px", width: 158, maxWidth: 158, minWidth: 0 }}>
-                    <Field label="Amount" value={extraCreditAmt} onChange={setExtraCreditAmt} type="number" unit="$" />
-                  </div>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
+                    gap: 8,
+                    marginTop: 6,
+                    alignItems: "end",
+                    marginBottom: 8,
+                  }}
+                >
+                  <Field label="Other Credit" value={extraCreditName} onChange={setExtraCreditName} placeholder="Name" shrink />
+                  <Field label="Amount" value={extraCreditAmt} onChange={setExtraCreditAmt} type="number" unit="$" shrink />
                   <button
                     type="button"
                     onClick={addExtraCredit}
@@ -1563,7 +1820,7 @@ export default function JantaProposal() {
                       marginBottom: 8,
                       borderRadius: 6,
                       border: `1px solid ${C.g200}`,
-                      background: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? C.navy : C.g300,
+                      background: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? C.blue : C.g300,
                       color: C.white,
                       fontSize: 18,
                       fontWeight: 700,
@@ -1590,8 +1847,81 @@ export default function JantaProposal() {
 
                 {/* Summary */}
                 <div style={{ background: C.g100, borderRadius: 8, padding: 12, border: `1px solid ${C.g200}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, fontFamily: fontSans }}>
+                    <span style={{ color: C.g500 }}>Solar PV</span>
+                    <span style={{ color: C.g700, fontWeight: 500 }}>${Math.round(solarGross).toLocaleString()}</span>
+                  </div>
+                  {batteryAdd > 0 && (
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, fontFamily: fontSans }}>
+                      <span style={{ color: C.g500, display: "inline-flex", alignItems: "center", gap: 8 }}>
+                        <button
+                          type="button"
+                          onClick={() => { setBatteryName(""); setBatteryCost(""); }}
+                          aria-label="Remove battery"
+                          title="Remove battery"
+                          style={{
+                            width: 12,
+                            height: 12,
+                            minWidth: 12,
+                            flexShrink: 0,
+                            border: "none",
+                            background: "transparent",
+                            color: "#2f3e4d",
+                            fontSize: 14,
+                            fontWeight: 700,
+                            lineHeight: "12px",
+                            padding: 0,
+                            cursor: "pointer",
+                            fontFamily: fontSans,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            boxSizing: "border-box",
+                          }}
+                        >
+                          ×
+                        </button>
+                        <span style={{ lineHeight: 1.25 }}>{batteryName.trim() || "Battery"}</span>
+                      </span>
+                      <span style={{ color: C.g700, fontWeight: 500 }}>${Math.round(batteryAdd).toLocaleString()}</span>
+                    </div>
+                  )}
+                  {generatorAdd > 0 && (
+                    <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, fontFamily: fontSans }}>
+                      <span style={{ color: C.g500, display: "inline-flex", alignItems: "center", gap: 8 }}>
+                        <button
+                          type="button"
+                          onClick={() => { setGeneratorName(""); setGeneratorCost(""); }}
+                          aria-label="Remove generator"
+                          title="Remove generator"
+                          style={{
+                            width: 12,
+                            height: 12,
+                            minWidth: 12,
+                            flexShrink: 0,
+                            border: "none",
+                            background: "transparent",
+                            color: "#2f3e4d",
+                            fontSize: 14,
+                            fontWeight: 700,
+                            lineHeight: "12px",
+                            padding: 0,
+                            cursor: "pointer",
+                            fontFamily: fontSans,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            boxSizing: "border-box",
+                          }}
+                        >
+                          ×
+                        </button>
+                        <span style={{ lineHeight: 1.25 }}>{generatorName.trim() || "Generator"}</span>
+                      </span>
+                      <span style={{ color: C.g700, fontWeight: 500 }}>${Math.round(generatorAdd).toLocaleString()}</span>
+                    </div>
+                  )}
                   {[
-                    ["System Cost", `$${grossCost.toLocaleString()}`, C.g700],
                     ...activeCreditItems.map((item) => [item.label, `-$${Math.round(item.amount).toLocaleString()}`, C.green, item.key, false]),
                     ...Object.keys(removedCreditKeys).map((key) => {
                       const removedLabelMap = {
@@ -1604,7 +1934,7 @@ export default function JantaProposal() {
                       return [removedLabelMap[key] || "Removed credit", "$0", C.g500, key, true];
                     }),
                   ].filter(Boolean).map(([k, v, c, key], i) => (
-                    <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, fontFamily: fontSans }}>
+                    <div key={key != null ? String(key) : `row-${i}`} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, fontFamily: fontSans }}>
                       <span style={{ color: C.g500, display: "inline-flex", alignItems: "center", gap: 8 }}>
                         {key && (
                           <button
@@ -1613,6 +1943,8 @@ export default function JantaProposal() {
                             style={{
                               width: 12,
                               height: 12,
+                              minWidth: 12,
+                              flexShrink: 0,
                               borderRadius: "50%",
                               border: `1px solid ${removedCreditKeys[key] ? C.g300 : C.green}`,
                               background: removedCreditKeys[key] ? C.white : C.green,
@@ -1620,11 +1952,12 @@ export default function JantaProposal() {
                               padding: 0,
                               display: "inline-block",
                               opacity: removedCreditKeys[key] ? 0.45 : 0.9,
+                              boxSizing: "border-box",
                             }}
                             title={removedCreditKeys[key] ? "Re-enable credit" : "Disable credit"}
                           />
                         )}
-                        {k}
+                        <span style={{ lineHeight: 1.25 }}>{k}</span>
                       </span>
                       <span style={{ color: c, fontWeight: 500 }}>{v}</span>
                     </div>
@@ -1792,21 +2125,41 @@ export default function JantaProposal() {
                 <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
                   Base System Price
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr 1fr", gap: 8, fontSize: 12, fontFamily: fontSans }}>
-                  <div>
-                    <div style={{ color: C.g500 }}>System Size</div>
-                    <div style={{ color: C.navy, fontWeight: 700 }}>{effectiveSize} kW</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, fontFamily: fontSans }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ color: C.g500 }}>System Size</span>
+                    <span style={{ color: C.navy, fontWeight: 700 }}>{effectiveSize} kW</span>
                   </div>
-                  <div>
-                    <div style={{ color: C.g500 }}>Price per kW</div>
-                    <div style={{ color: C.navy, fontWeight: 700 }}>${Math.round(costPerKW).toLocaleString()}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ color: C.g500 }}>Price per kW</span>
+                    <span style={{ color: C.navy, fontWeight: 700 }}>${Math.round(costPerKW).toLocaleString()}</span>
                   </div>
-                  <div>
-                    <div style={{ color: C.g500 }}>Gross Cost</div>
-                    <div style={{ color: C.navy, fontWeight: 700 }}>${Math.round(grossCost).toLocaleString()}</div>
+                  <div style={{ borderTop: `1px dashed ${C.g200}`, marginTop: 2, paddingTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ color: C.blue, fontWeight: 700 }}>System Total (Solar PV)</span>
+                    <span style={{ color: C.blue, fontWeight: 700, fontFamily: fontSans }}>${Math.round(solarGross).toLocaleString()}</span>
                   </div>
                 </div>
               </div>
+
+              {(batteryAdd > 0 || generatorAdd > 0) && (
+                <div style={{ marginTop: 12, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: 12 }}>
+                  <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
+                    Battery & Generator
+                  </div>
+                  {batteryAdd > 0 && (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: generatorAdd > 0 ? `1px dashed ${C.g200}` : "none", fontSize: 12 }}>
+                      <span style={{ color: C.g700 }}>{batteryName.trim() || "Battery Storage"}</span>
+                      <span style={{ color: C.navy, fontFamily: fontSans, fontWeight: 700 }}>${Math.round(batteryAdd).toLocaleString()}</span>
+                    </div>
+                  )}
+                  {generatorAdd > 0 && (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
+                      <span style={{ color: C.g700 }}>{generatorName.trim() || "Generator"}</span>
+                      <span style={{ color: C.navy, fontFamily: fontSans, fontWeight: 700 }}>${Math.round(generatorAdd).toLocaleString()}</span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div style={{ marginTop: 12, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: 12 }}>
                 <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
