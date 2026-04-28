@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.gitignore
+npm-debug.log*
+.DS_Store
+*.local
+*.tmp
+*.swp
+.cursor
+agent-transcripts
+terminals
