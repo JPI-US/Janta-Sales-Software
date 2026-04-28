@@ -5,13 +5,12 @@ import { useState, useEffect, useMemo, useRef } from "react";
   JANTA POWER — Solar Proposal Generator
   
   Workflow: Upload/paste bill → Auto-extract customer + usage →
-            SAM-calibrated system recommendation → Generate proposal
+            Set system & capacity factor → Generate proposal
  ══════════════════════════════════════════════════════════════════════
 */
 
-// ─── SAM-Calibrated Production Data ─────────────────────────────────
-// Monthly kWh output per 1 kW-DC installed, validated against real proposals.
-// When "Use NREL PVWatts API" is on, production comes from NREL's PVWatts v8 (SAM-style) instead.
+// ─── Regional production curves (kWh per kW-DC per month) ───────────
+// When "Use NREL PVWatts API" is on, monthly/annual values come from NREL's PVWatts v8 instead.
 const REGIONS = {
   illinois: {
     label: "Illinois",
@@ -77,6 +76,9 @@ const REGIONS = {
     credits: ["itc"],
   },
 };
+
+/** Janta tower increments — system kW is always an integer multiple of this value. */
+const SYSTEM_SIZE_STEP_KW = 5.4;
 
 const STATE_TO_REGION = {
   IL: "illinois",
@@ -525,33 +527,6 @@ function extractBillData(text) {
   return result;
 }
 
-// ─── System Sizing Engine ───────────────────────────────────────────
-function recommendSystem(annualKWh, regionKey, annualPerKWOverride) {
-  const region = REGIONS[regionKey];
-  const annualPerKW =
-    annualPerKWOverride != null && annualPerKWOverride > 0
-      ? annualPerKWOverride
-      : region.monthlyPerKW.reduce((a, b) => a + b, 0);
-
-  const rawSize = annualKWh / annualPerKW;
-  const sizes = [5, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 120, 150, 180, 200, 250, 300];
-  let recommended = sizes[0];
-  for (const s of sizes) {
-    if (s >= rawSize * 0.9) {
-      recommended = s;
-      break;
-    }
-    recommended = s;
-  }
-  const idx = sizes.indexOf(recommended);
-  const options = {
-    conservative: idx > 0 ? sizes[idx - 1] : sizes[0],
-    recommended,
-    aggressive: idx < sizes.length - 1 ? sizes[idx + 1] : sizes[sizes.length - 1],
-  };
-  return { rawSize, options, annualPerKW };
-}
-
 // ─── Colors ─────────────────────────────────────────────────────────
 const C = {
   navy: "#2F3B4C", navyLight: "#43566D", gold: "#F3B664", goldLight: "#F7C983",
@@ -802,8 +777,8 @@ export default function JantaProposal() {
 
   // ── Region & System ──
   const [region, setRegion] = useState("illinois");
-  const [systemSize, setSystemSize] = useState(5);
-  const [customSize, setCustomSize] = useState("");
+  /** Integer count of SYSTEM_SIZE_STEP_KW (min 1 → 5.4 kW). */
+  const [systemStepIndex, setSystemStepIndex] = useState(1);
   const [pricingPerKW, setPricingPerKW] = useState(String(DEFAULT_PRICING_PER_KW));
 
   // ── NREL PVWatts (SAM-style) API ──
@@ -825,6 +800,8 @@ export default function JantaProposal() {
   const [samModuleType, setSamModuleType] = useState(0);
   const [samLosses, setSamLosses] = useState("2");
   const [samDcAcRatio, setSamDcAcRatio] = useState("1.0");
+  /** Empty = use PVWatts or regional default; otherwise percent (e.g. 23.1) */
+  const [capacityFactorPct, setCapacityFactorPct] = useState("");
 
   // ── Credits (state-based) ──
   const [selState, setSelState] = useState("IL");
@@ -1023,14 +1000,39 @@ export default function JantaProposal() {
   // ── Computed values ──
   const annualKWh = monthlyKWh.reduce((a, b) => a + b, 0);
   const reg = REGIONS[region];
-  const effectiveMonthlyPerKW = samData?.monthlyPerKW ?? reg.monthlyPerKW;
-  const effectiveAnnualPerKW = samData?.annualPerKW ?? reg.monthlyPerKW.reduce((a, b) => a + b, 0);
-  const effectiveCF = samData?.capacityFactor != null ? samData.capacityFactor : reg.capacityFactor;
-  const sizing = recommendSystem(annualKWh, region, effectiveAnnualPerKW);
-  const effectiveSize = customSize ? parseFloat(customSize) || systemSize : systemSize;
+  const baseMonthly = samData?.monthlyPerKW ?? reg.monthlyPerKW;
+  const baseAnnualPerKW =
+    samData?.annualPerKW != null
+      ? samData.annualPerKW
+      : baseMonthly.reduce((a, b) => a + Number(b), 0);
+  const baseCF = baseAnnualPerKW > 0 ? baseAnnualPerKW / 8760 : reg.capacityFactor;
+  const cfInput = parseFloat(String(capacityFactorPct).replace(/%/g, "").trim());
+  const hasManualCf = String(capacityFactorPct).trim() !== "" && Number.isFinite(cfInput);
+  const effectiveCF = hasManualCf ? Math.min(99.9, Math.max(0, cfInput)) / 100 : baseCF;
+  const effectiveAnnualPerKW = hasManualCf ? effectiveCF * 8760 : baseAnnualPerKW;
+  const monthScale = hasManualCf && baseAnnualPerKW > 0 ? effectiveAnnualPerKW / baseAnnualPerKW : 1;
+  const effectiveMonthlyPerKW = hasManualCf
+    ? baseMonthly.map((m) => Math.round(Number(m) * monthScale))
+    : baseMonthly;
+  const cfSourceLabel = hasManualCf
+    ? "Custom"
+    : samData
+      ? "NREL PVWatts"
+      : `vs ${(reg.traditionalCF * 100).toFixed(1)}% traditional`;
+  /** Step count closest to 60% offset (may be slightly above or below 60% once snapped to 5.4 kW). */
+  const optimalSystemStep = useMemo(() => {
+    if (!annualKWh || !effectiveAnnualPerKW || effectiveAnnualPerKW <= 0) return 1;
+    const targetKw = (0.6 * annualKWh) / effectiveAnnualPerKW;
+    return Math.max(1, Math.round(targetKw / SYSTEM_SIZE_STEP_KW));
+  }, [annualKWh, effectiveAnnualPerKW]);
+
+  useEffect(() => {
+    setSystemStepIndex(optimalSystemStep);
+  }, [optimalSystemStep]);
+
+  const effectiveSize = Math.round(systemStepIndex * SYSTEM_SIZE_STEP_KW * 10) / 10;
   const costPerKW = parseFloat(pricingPerKW) > 0 ? parseFloat(pricingPerKW) : DEFAULT_PRICING_PER_KW;
   const monthlyProd = effectiveMonthlyPerKW.map((m) => Math.round(m * effectiveSize));
-  // Use annual-per-kW math for offset so SAM sizing and offset stay consistent.
   const annualProdRaw = effectiveAnnualPerKW * effectiveSize;
   const annualProd = Math.round(annualProdRaw);
   const requiredKwForFullOffset = effectiveAnnualPerKW > 0 ? annualKWh / effectiveAnnualPerKW : 0;
@@ -1137,7 +1139,7 @@ export default function JantaProposal() {
   // ── Step titles ──
   const steps = [
     { label: "Bill Analysis", icon: "1" },
-    { label: "System & SAM", icon: "2" },
+    { label: "System", icon: "2" },
     { label: "Shadow Calc", icon: "3" },
     { label: "Proposal", icon: "4" },
   ];
@@ -1329,7 +1331,7 @@ export default function JantaProposal() {
           </div>
         )}
 
-        {/* ═══ STEP 1: SYSTEM & SAM ═══ */}
+        {/* ═══ STEP 1: SYSTEM ═══ */}
         {step === 1 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
@@ -1436,56 +1438,77 @@ export default function JantaProposal() {
 
                 <div style={{ marginBottom: 10, background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 10, padding: 12 }}>
                   <div style={{ color: C.g500, fontSize: 10, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>System Summary</div>
-                  <div style={{ color: C.navy, fontSize: 22, fontWeight: 700, fontFamily: fontSerif, lineHeight: 1.1 }}>
-                    {effectiveSize} kW
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <button
+                      type="button"
+                      aria-label="Decrease system size by one step"
+                      onClick={() => setSystemStepIndex((n) => Math.max(1, n - 1))}
+                      style={{
+                        width: 40,
+                        height: 40,
+                        borderRadius: 8,
+                        border: `1px solid ${C.g200}`,
+                        background: C.white,
+                        color: C.navy,
+                        fontSize: 22,
+                        fontWeight: 700,
+                        cursor: systemStepIndex <= 1 ? "default" : "pointer",
+                        opacity: systemStepIndex <= 1 ? 0.35 : 1,
+                        lineHeight: 1,
+                        padding: 0,
+                        flexShrink: 0,
+                      }}
+                      disabled={systemStepIndex <= 1}
+                    >
+                      −
+                    </button>
+                    <div style={{ flex: 1, textAlign: "center", color: C.navy, fontSize: 22, fontWeight: 700, fontFamily: fontSerif, lineHeight: 1.1 }}>
+                      {effectiveSize.toFixed(1)} kW
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Increase system size by one step"
+                      onClick={() => setSystemStepIndex((n) => n + 1)}
+                      style={{
+                        width: 40,
+                        height: 40,
+                        borderRadius: 8,
+                        border: `1px solid ${C.g200}`,
+                        background: C.white,
+                        color: C.navy,
+                        fontSize: 22,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        lineHeight: 1,
+                        padding: 0,
+                        flexShrink: 0,
+                      }}
+                    >
+                      +
+                    </button>
                   </div>
                   <div style={{ marginTop: 4, color: offsetPct >= 80 ? C.green : C.gold, fontSize: 13, fontWeight: 600, fontFamily: fontSans }}>
                     Offset: {offsetPct.toFixed(0)}%
                   </div>
-                  <div style={{ marginTop: 8 }}>
+                  {annualKWh > 0 && effectiveAnnualPerKW > 0 && (
+                    <div style={{ marginTop: 4, color: C.g500, fontSize: 10, fontFamily: fontSans }}>
+                      Automatically picks the system size step closest to ~60% offset.
+                    </div>
+                  )}
+                  <div style={{ marginTop: 10 }}>
                     <Field
-                      label="Set system size (kW)"
-                      value={customSize}
-                      onChange={setCustomSize}
-                      type="number"
-                      unit="kW"
-                      placeholder={`${systemSize}`}
+                      label="Capacity factor (%)"
+                      value={capacityFactorPct}
+                      onChange={setCapacityFactorPct}
+                      type="text"
+                      unit="%"
+                      placeholder={baseCF != null ? (baseCF * 100).toFixed(1) : "—"}
                     />
-                    <div style={{ marginTop: -4, color: C.g500, fontSize: 10, fontFamily: fontSans }}>
-                      Leave blank to use recommended selection.
+                    <div style={{ marginTop: 4, color: C.g500, fontSize: 10, fontFamily: fontSans }}>
+                      Leave blank to use {samData ? "NREL PVWatts" : "regional default"} ({(baseCF * 100).toFixed(1)}%). Enter a value to override production and offset math.
                     </div>
                   </div>
                 </div>
-
-                {/* Recommendation */}
-                {annualKWh > 0 && (
-                  <div style={{ background: `${C.gold}0D`, border: `1px solid ${C.gold}33`, borderRadius: 8, padding: 10, marginTop: 8 }}>
-                    <div style={{ color: C.gold, fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", fontFamily: fontSans, marginBottom: 4 }}>SAM-Based Recommendation</div>
-                    <div style={{ color: C.g700, fontSize: 11, fontFamily: fontSans, marginBottom: 8, lineHeight: 1.35 }}>
-                      Based on {annualKWh.toLocaleString()} kWh/yr usage and {samData ? "NREL PVWatts" : reg.label} ({Math.round(sizing.annualPerKW).toLocaleString()} kWh/kW/yr), you need <strong>{sizing.rawSize.toFixed(1)} kW</strong> for full offset.
-                    </div>
-                    <div style={{ display: "flex", gap: 5 }}>
-                      {[
-                        { label: "Conservative", size: sizing.options.conservative, desc: `${Math.round(sizing.options.conservative * sizing.annualPerKW / annualKWh * 100)}% offset` },
-                        { label: "Recommended", size: sizing.options.recommended, desc: `${Math.round(sizing.options.recommended * sizing.annualPerKW / annualKWh * 100)}% offset` },
-                        { label: "Aggressive", size: sizing.options.aggressive, desc: `${Math.round(sizing.options.aggressive * sizing.annualPerKW / annualKWh * 100)}% offset` },
-                      ].map(opt => (
-                        <button key={opt.label} onClick={() => { setSystemSize(opt.size); setCustomSize(""); }}
-                          style={{
-                            flex: 1, padding: "7px 6px", borderRadius: 6, cursor: "pointer",
-                            border: `2px solid ${effectiveSize === opt.size ? C.navy : C.g200}`,
-                            background: effectiveSize === opt.size ? C.navy : C.white,
-                            color: effectiveSize === opt.size ? C.white : C.g700,
-                            textAlign: "center",
-                          }}>
-                          <div style={{ fontSize: 14, fontWeight: 700, fontFamily: fontSerif }}>{opt.size} kW</div>
-                          <div style={{ fontSize: 8, opacity: 0.7, fontFamily: fontSans, marginTop: 1 }}>{opt.label}</div>
-                          <div style={{ fontSize: 8, opacity: 0.6, fontFamily: fontSans }}>{opt.desc}</div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
 
               <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
@@ -1520,22 +1543,43 @@ export default function JantaProposal() {
 
                 <Toggle label="Energy Community Bonus (+10%)" checked={ecOn} onChange={setEcOn} />
 
-                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                  <Field label="Other Credit" value={extraCreditName} onChange={setExtraCreditName} placeholder="Name" />
-                  <Field label="Amount" value={extraCreditAmt} onChange={setExtraCreditAmt} type="number" unit="$" />
+                <div style={{ display: "flex", gap: 8, marginTop: 6, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 8 }}>
+                  <div style={{ flex: "1 1 0", maxWidth: 200, minWidth: 0 }}>
+                    <Field label="Other Credit" value={extraCreditName} onChange={setExtraCreditName} placeholder="Name" />
+                  </div>
+                  <div style={{ flex: "0 0 158px", width: 158, maxWidth: 158, minWidth: 0 }}>
+                    <Field label="Amount" value={extraCreditAmt} onChange={setExtraCreditAmt} type="number" unit="$" />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={addExtraCredit}
+                    disabled={!extraCreditName.trim() || !(parseFloat(extraCreditAmt) > 0)}
+                    aria-label="Add credit"
+                    title="Add credit"
+                    style={{
+                      flexShrink: 0,
+                      width: 30,
+                      height: 30,
+                      marginBottom: 8,
+                      borderRadius: 6,
+                      border: `1px solid ${C.g200}`,
+                      background: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? C.navy : C.g300,
+                      color: C.white,
+                      fontSize: 18,
+                      fontWeight: 700,
+                      lineHeight: 1,
+                      padding: 0,
+                      cursor: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? "pointer" : "default",
+                      fontFamily: fontSans,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      opacity: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? 1 : 0.5,
+                    }}
+                  >
+                    +
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={addExtraCredit}
-                  disabled={!extraCreditName.trim() || !(parseFloat(extraCreditAmt) > 0)}
-                  style={{
-                    marginBottom: 8, padding: "8px 12px", background: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? C.navy : C.g300,
-                    color: C.white, border: "none", borderRadius: 6, cursor: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? "pointer" : "default",
-                    fontSize: 12, fontWeight: 600, fontFamily: fontSans,
-                  }}
-                >
-                  Add Credit
-                </button>
                 {Object.keys(removedCreditKeys).length > 0 && (
                   <div style={{ marginBottom: 8 }}>
                     <button type="button" onClick={restoreAllAutoCredits} style={{ background: "transparent", border: "none", color: C.blue, fontSize: 11, fontFamily: fontSans, cursor: "pointer", padding: 0 }}>
@@ -1589,17 +1633,13 @@ export default function JantaProposal() {
                     <span style={{ color: C.navy, fontWeight: 700, fontSize: 13 }}>Net Cost</span>
                     <span style={{ color: C.navy, fontWeight: 700, fontSize: 13, fontFamily: fontSans }}>${Math.round(netCost).toLocaleString()}</span>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ color: C.green, fontWeight: 600, fontSize: 12 }}>Total Savings</span>
-                    <span style={{ color: C.green, fontWeight: 600, fontSize: 12, fontFamily: fontSans }}>${Math.round(totalCredits).toLocaleString()}</span>
-                  </div>
                 </div>
               </div>
             </div>
 
             {/* Production metrics */}
             <div style={{ display: "flex", gap: 10 }}>
-              <Metric label="Janta CF" value={`${(effectiveCF * 100).toFixed(1)}%`} sub={samData ? "NREL PVWatts" : `vs ${(reg.traditionalCF * 100).toFixed(1)}% traditional`} color={C.green} highlight />
+              <Metric label="Janta CF" value={`${(effectiveCF * 100).toFixed(1)}%`} sub={cfSourceLabel} color={C.green} highlight />
               <Metric label="Annual Production" value={annualProd.toLocaleString()} sub="kWh/yr" color={C.blue} highlight />
             </div>
 
@@ -1719,7 +1759,7 @@ export default function JantaProposal() {
               {[
                 ["25-Year Utility Savings", `$${(savings25 / 1000).toFixed(1)}K`],
                 ['Approximate "Break-Even"', `${breakEven} Years`],
-                ["Janta Power's Capacity Factor", `${(effectiveCF * 100).toFixed(1)}%${samData ? " (NREL PVWatts)" : ` (${(reg.traditionalCF * 100).toFixed(1)}% for Traditional)`}`],
+                ["Janta Power's Capacity Factor", `${(effectiveCF * 100).toFixed(1)}%${hasManualCf ? " (custom)" : samData ? " (NREL PVWatts)" : ` (${(reg.traditionalCF * 100).toFixed(1)}% for Traditional)`}`],
                 ["Annual Energy Production", `${annualProd.toLocaleString()} kWh`],
                 ["Annual Return on Investment", `${roi.toFixed(1)}%`],
               ].map(([k, v]) => (
@@ -1739,7 +1779,7 @@ export default function JantaProposal() {
             <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}` }}>
               <h3 style={{ margin: "0 0 6px 0", fontSize: 18, fontWeight: 700, color: C.navy }}>Seasonal Production</h3>
               <p style={{ color: C.g500, fontSize: 11, fontFamily: fontSans, margin: "0 0 14px 0" }}>
-                Average power (kW) by month for the {effectiveSize} kW system{samData ? " — from NREL PVWatts (SAM)" : ""}.
+                Average power (kW) by month for the {effectiveSize} kW system{hasManualCf ? " (scaled to your capacity factor)" : samData ? " — from NREL PVWatts" : ""}.
               </p>
               <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={220} title="" />
             </div>
