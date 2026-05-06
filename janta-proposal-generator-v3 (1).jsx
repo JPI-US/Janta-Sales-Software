@@ -31,11 +31,11 @@ const REGIONS = {
     credits: ["itc"],
   },
   texas: {
-    label: "Texas",
-    lat: 32.78,
-    lon: -96.8,
+    label: "Texas (Dallas area)",
+    lat: 32.7767,
+    lon: -96.797,
     monthlyPerKW: [155, 165, 210, 225, 245, 250, 240, 230, 210, 190, 160, 142],
-    capacityFactor: 0.259,
+    capacityFactor: 2422 / 8760,
     traditionalCF: 0.189,
     credits: ["itc"],
   },
@@ -79,6 +79,8 @@ const REGIONS = {
 
 /** Janta tower increments — system kW is always an integer multiple of this value. */
 const SYSTEM_SIZE_STEP_KW = 5.4;
+const SQFT_PER_ACRE = 43560;
+const THEME_KEY = "janta_dark_mode_v1";
 
 function snapSystemSizeKw(kw) {
   if (!Number.isFinite(kw) || kw <= 0) return SYSTEM_SIZE_STEP_KW;
@@ -105,6 +107,45 @@ const STATE_TO_REGION = {
   FL: "florida",
   NY: "northeast", NJ: "northeast", PA: "northeast", CT: "northeast", MA: "northeast", RI: "northeast", VT: "northeast", NH: "northeast", ME: "northeast",
   OH: "midwest", MI: "midwest", MN: "midwest", MO: "midwest", WI: "midwest", IA: "midwest", IN: "midwest", KS: "midwest", NE: "midwest", ND: "midwest", SD: "midwest",
+};
+
+const REGION_LAND_VALUE_PER_ACRE = {
+  illinois: 12000,
+  california: 18000,
+  texas: 9000,
+  arizona: 7000,
+  florida: 11000,
+  northeast: 14000,
+  midwest: 9500,
+};
+
+const STATE_LAND_VALUE_PER_ACRE = {
+  IL: 12000, CA: 18000, TX: 9000, AZ: 7000, FL: 11000,
+  NY: 14500, NJ: 15000, PA: 12000, CT: 14000, MA: 14500, RI: 14000, VT: 9000, NH: 10000, ME: 8500,
+  OH: 9000, MI: 8500, MN: 8000, MO: 7500, WI: 8000, IA: 9000, IN: 8500, KS: 6500, NE: 6000, ND: 5000, SD: 5500,
+  CO: 7000, OR: 8500, WA: 12000, NC: 8500, SC: 7000, GA: 8000, VA: 9000, MD: 11500, DE: 10000,
+  OK: 6000, NM: 4500, NV: 5000, ID: 6500, UT: 6000, MT: 4500, WY: 3500, AK: 2500, HI: 26000, LA: 6500, MS: 5500,
+  AL: 6500, AR: 6000, KY: 6000, TN: 7000, WV: 5000, DC: 20000,
+};
+
+const COUNTY_LAND_VALUE_PER_ACRE = {
+  "madison,il": 13000,
+  "st. clair,il": 11500,
+  "st clair,il": 11500,
+  "cook,il": 20000,
+  "dupage,il": 18000,
+  "will,il": 15000,
+  "kane,il": 14000,
+  "lake,il": 17000,
+  "los angeles,ca": 22000,
+  "orange,ca": 23000,
+  "san diego,ca": 21000,
+  "harris,tx": 9500,
+  "dallas,tx": 10000,
+  "maricopa,az": 7500,
+  "miami-dade,fl": 14000,
+  "broward,fl": 13500,
+  "new york,ny": 26000,
 };
 
 const STATE_NAME_TO_ABBR = {
@@ -187,7 +228,7 @@ function detectRegionFromLocation({ address, lat, lon, utilityName }) {
   if (util.includes("ameren")) return "illinois";
   if (util.includes("edison") || util.includes("sce")) return "california";
   if (util.includes("oncor") || util.includes("ercot") || util.includes("txu")) return "texas";
-  return "illinois";
+  return "texas";
 }
 
 function detectStateFromLocation({ address, utilityName }) {
@@ -197,7 +238,7 @@ function detectStateFromLocation({ address, utilityName }) {
   if (util.includes("ameren")) return "IL";
   if (util.includes("edison") || util.includes("sce")) return "CA";
   if (util.includes("oncor") || util.includes("ercot") || util.includes("txu")) return "TX";
-  return "IL";
+  return "TX";
 }
 
 // ─── NREL PVWatts v8 API (SAM-style production data) ─────────────────
@@ -274,6 +315,32 @@ async function geocodeAddress(address) {
   }
   const { lat, lon } = data[0];
   return { lat: parseFloat(lat), lon: parseFloat(lon) };
+}
+
+async function reverseGeocodeCountyState(lat, lon) {
+  const res = await fetch(
+    `https://nominatim.openstreetmap.org/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&format=jsonv2&addressdetails=1&zoom=10`,
+    { headers: { "Accept-Language": "en", "User-Agent": "JantaProposalGenerator/1.0" } }
+  );
+  const data = await res.json();
+  const addr = data?.address || {};
+  const countyRaw = addr.county || addr.city_district || "";
+  const county = String(countyRaw).replace(/\s+county$/i, "").trim();
+  const stateName = String(addr.state || "").toLowerCase().trim();
+  const stateAbbr = STATE_NAME_TO_ABBR[stateName] || String(addr.state_code || "").toUpperCase() || "";
+  return { county, stateAbbr };
+}
+
+function estimateSavedLandValuePerAcre({ county, stateAbbr, region }) {
+  const countyKey = `${String(county || "").toLowerCase().replace(/\s+/g, " ").trim()},${String(stateAbbr || "").toLowerCase()}`;
+  if (countyKey && COUNTY_LAND_VALUE_PER_ACRE[countyKey] != null) {
+    return { value: COUNTY_LAND_VALUE_PER_ACRE[countyKey], source: `County estimate (${county}, ${stateAbbr})` };
+  }
+  if (stateAbbr && STATE_LAND_VALUE_PER_ACRE[stateAbbr] != null) {
+    return { value: STATE_LAND_VALUE_PER_ACRE[stateAbbr], source: `State estimate (${stateAbbr})` };
+  }
+  const regionValue = REGION_LAND_VALUE_PER_ACRE[region] ?? REGION_LAND_VALUE_PER_ACRE.texas;
+  return { value: regionValue, source: `Region fallback (${region || "texas"})` };
 }
 
 async function extractTextFromPdfFile(file) {
@@ -551,6 +618,24 @@ const C = {
   g100: "#ECEEF1", g200: "#DDE2E8", g300: "#C7CFD8", g500: "#6F8096", g700: "#354356",
   green: "#2A9D8F", red: "#F55A5A", blue: "#87A9C4",
 };
+const LIGHT_C = { ...C };
+const DARK_C = {
+  navy: "#15100C",
+  navyLight: "#1D1611",
+  gold: "#C9933E",
+  goldLight: "#E4BE72",
+  white: "#14100D",
+  offWhite: "#0C0907",
+  cream: "#17120E",
+  g100: "#1F1813",
+  g200: "#2C221A",
+  g300: "#3B2D21",
+  g500: "#C1B5A5",
+  g700: "#F0E8DF",
+  green: "#80C29A",
+  red: "#E08C7E",
+  blue: "#D4A15A",
+};
 
 // ─── Micro Components ───────────────────────────────────────────────
 const fontSans = "'Inter', system-ui, -apple-system, sans-serif";
@@ -563,7 +648,7 @@ function systemSizeStepControlStyle(pressed) {
     borderRadius: 6,
     border: `1px solid ${C.g200}`,
     background: pressed ? C.blue : C.g300,
-    color: C.white,
+    color: "#F8F2E8",
     fontSize: 18,
     fontWeight: 700,
     lineHeight: 1,
@@ -587,20 +672,69 @@ function Pill({ children, active, onClick }) {
   }}>{children}</button>;
 }
 
-function Field({ label, value, onChange, type = "text", unit, placeholder, disabled, wide, rows, endSlot, shrink, list }) {
+function Field({ label, value, onChange, type = "text", unit, placeholder, disabled, wide, rows, endSlot, shrink, list, step, min, max, beforeUnit, inlineUnit }) {
   const El = rows ? "textarea" : "input";
-  const inputRow = (
+  const numProps = !rows && type === "number" ? {
+    ...(step !== undefined ? { step } : {}),
+    ...(min !== undefined ? { min } : {}),
+    ...(max !== undefined ? { max } : {}),
+  } : {};
+  const hasTrailingUnitPill = Boolean(unit && !inlineUnit);
+  const hasRightSegments = Boolean(beforeUnit || hasTrailingUnitPill);
+  const segmentTail = (
+    <>
+      {beforeUnit && (
+        <div style={{
+          padding: "8px 10px", background: C.g100, color: C.g700, fontSize: 11, fontWeight: 600,
+          border: `1px solid ${C.g200}`, borderLeft: "none", fontFamily: fontSans, whiteSpace: "nowrap",
+          display: "flex", alignItems: "center", borderRadius: hasTrailingUnitPill ? 0 : "0 8px 8px 0",
+        }}>
+          {beforeUnit}
+        </div>
+      )}
+      {hasTrailingUnitPill && (
+        <div style={{
+          padding: "8px 8px", background: C.g100, color: C.g500, fontSize: 11,
+          borderRadius: "0 8px 8px 0", border: `1px solid ${C.g200}`, borderLeft: "none",
+          fontFamily: fontSans, whiteSpace: "nowrap", display: "flex", alignItems: "center",
+        }}>{unit}</div>
+      )}
+    </>
+  );
+  const useInlineUnit = Boolean(!rows && inlineUnit);
+  const inputRow = useInlineUnit ? (
+    <>
+      <div style={{
+        display: "flex", alignItems: "center", flex: 1, minWidth: shrink ? 0 : undefined,
+        background: disabled ? C.g100 : C.cream, border: `1px solid ${C.g200}`,
+        borderRadius: hasRightSegments ? "8px 0 0 8px" : 8, boxSizing: "border-box",
+      }}>
+        <El type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+          disabled={disabled} list={list || undefined}
+          {...numProps}
+          style={{
+            flex: 1, minWidth: 0, padding: "8px 6px 8px 10px", background: "transparent",
+            border: "none", borderRadius: 0, color: C.g700, fontSize: 13, outline: "none", fontFamily: fontSans,
+            boxSizing: "border-box",
+          }}
+        />
+        <span style={{ color: C.g500, fontSize: 12, paddingRight: 10, fontFamily: fontSans, flexShrink: 0, userSelect: "none" }}>{inlineUnit}</span>
+      </div>
+      {segmentTail}
+    </>
+  ) : (
     <>
       <El type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
         disabled={disabled} rows={rows} list={!rows && list ? list : undefined}
+        {...numProps}
         style={{
           flex: 1, minWidth: shrink ? 0 : undefined, padding: rows ? 10 : "8px 10px", background: disabled ? C.g100 : C.cream,
-          border: `1px solid ${C.g200}`, borderRadius: unit ? "8px 0 0 8px" : 8,
+          border: `1px solid ${C.g200}`, borderRadius: hasRightSegments ? "8px 0 0 8px" : 8,
           color: C.g700, fontSize: 13, outline: "none", fontFamily: rows ? "monospace" : fontSans,
           resize: rows ? "vertical" : undefined, boxSizing: "border-box", width: "100%",
         }}
       />
-      {unit && <div style={{ padding: "8px 8px", background: C.g100, color: C.g500, fontSize: 11, borderRadius: "0 8px 8px 0", border: `1px solid ${C.g200}`, borderLeft: "none", fontFamily: fontSans, whiteSpace: "nowrap", display: "flex", alignItems: "center" }}>{unit}</div>}
+      {!rows && segmentTail}
     </>
   );
   return (
@@ -656,7 +790,7 @@ function Toggle({ label, checked, onChange }) {
   );
 }
 
-function BarChart({ data, data2, labels, color1 = C.navy, color2 = C.gold, height = 170, legend }) {
+function BarChart({ data, data2, labels, color1 = C.navy, color2 = C.gold, height = 170, legend, showBarValues = false }) {
   const max = Math.max(...data, ...(data2 || []), 1);
   const [hoverBar, setHoverBar] = useState(null); // { idx, series: 1 | 2 }
   return (
@@ -664,7 +798,7 @@ function BarChart({ data, data2, labels, color1 = C.navy, color2 = C.gold, heigh
       {hoverBar != null && (
         <div style={{
           position: "absolute", top: -6, left: "50%", transform: "translateX(-50%)",
-          background: hoverBar.series === 2 ? color2 : color1, color: C.white, borderRadius: 6, padding: "6px 8px",
+          background: hoverBar.series === 2 ? color2 : color1, color: "#F8F2E8", borderRadius: 6, padding: "6px 8px",
           fontSize: 10, fontFamily: fontSans, zIndex: 2, pointerEvents: "none", whiteSpace: "nowrap",
           boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
         }}>
@@ -678,22 +812,58 @@ function BarChart({ data, data2, labels, color1 = C.navy, color2 = C.gold, heigh
           <span style={{ color: C.g500, fontSize: 10, fontFamily: fontSans }}>{l.label}</span>
         </div>)}
       </div>}
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height, position: "relative" }} onMouseLeave={() => setHoverBar(null)}>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height, position: "relative", paddingTop: showBarValues ? 16 : 0 }} onMouseLeave={() => setHoverBar(null)}>
         {data.map((v, i) => (
           <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", height: "100%", justifyContent: "flex-end" }}>
-            <div style={{ display: "flex", gap: 1, alignItems: "flex-end", width: "100%", flex: 1, minHeight: 20 }}>
+            <div style={{ display: "flex", gap: 1, alignItems: "flex-end", width: "100%", flex: 1, minHeight: 20, paddingBottom: 2 }}>
               <div
                 onMouseEnter={() => setHoverBar({ idx: i, series: 1 })}
-                style={{ flex: 1, height: `${Math.max((v / max) * 100, 1)}%`, background: color1, borderRadius: "2px 2px 0 0", transition: "height 0.3s" }}
-              />
+                style={{ flex: 1, height: `${Math.max((v / max) * 100, 1)}%`, background: color1, borderRadius: "2px 2px 0 0", transition: "height 0.3s", position: "relative" }}
+              >
+                {showBarValues && Number(v) > 0 && (
+                  <span
+                    style={{
+                      position: "absolute",
+                      left: "50%",
+                      bottom: "calc(100% + 2px)",
+                      transform: "translateX(-50%)",
+                      color: C.g500,
+                      fontSize: 9,
+                      fontFamily: fontSans,
+                      whiteSpace: "nowrap",
+                      pointerEvents: "none",
+                    }}
+                  >
+                    {Math.round(Number(v)).toLocaleString()}
+                  </span>
+                )}
+              </div>
               {data2 && (
                 <div
                   onMouseEnter={() => setHoverBar({ idx: i, series: 2 })}
-                  style={{ flex: 1, height: `${Math.max(((data2[i] || 0) / max) * 100, 1)}%`, background: color2, borderRadius: "2px 2px 0 0", transition: "height 0.3s" }}
-                />
+                  style={{ flex: 1, height: `${Math.max(((data2[i] || 0) / max) * 100, 1)}%`, background: color2, borderRadius: "2px 2px 0 0", transition: "height 0.3s", position: "relative" }}
+                >
+                  {showBarValues && Number(data2[i] || 0) > 0 && (
+                    <span
+                      style={{
+                        position: "absolute",
+                        left: "50%",
+                        bottom: "calc(100% + 2px)",
+                        transform: "translateX(-50%)",
+                        color: C.g500,
+                        fontSize: 9,
+                        fontFamily: fontSans,
+                        whiteSpace: "nowrap",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      {Math.round(Number(data2[i] || 0)).toLocaleString()}
+                    </span>
+                  )}
+                </div>
               )}
             </div>
-            <span style={{ color: C.g500, fontSize: 8, marginTop: 3, fontFamily: fontSans }}>{labels[i]}</span>
+            <span style={{ color: C.g500, fontSize: 8, marginTop: 6, lineHeight: 1, minHeight: 10, fontFamily: fontSans }}>{labels[i]}</span>
           </div>
         ))}
       </div>
@@ -723,7 +893,7 @@ function SeasonalChart({ monthlyKWh, labels = MONTHS, color = C.gold, height = 2
       {hoverIdx != null && (
         <div style={{
           position: "absolute", top: 4, right: 8,
-          background: C.navy, color: C.white, borderRadius: 6, padding: "6px 8px",
+          background: C.navy, color: "#F8F2E8", borderRadius: 6, padding: "6px 8px",
           fontSize: 10, fontFamily: fontSans, zIndex: 2, pointerEvents: "none",
           boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
         }}>
@@ -748,7 +918,7 @@ function SeasonalChart({ monthlyKWh, labels = MONTHS, color = C.gold, height = 2
           <line key={i} x1={pad.left + (i + 0.5) * (chartW / 12)} y1={pad.top} x2={pad.left + (i + 0.5) * (chartW / 12)} y2={pad.top + chartH} stroke={C.g200} strokeWidth={0.5} strokeDasharray="4,2" />
         ))}
         {/* Y-axis label */}
-        <text x={pad.left - 40} y={pad.top + chartH / 2} textAnchor="middle" fill={C.g500} fontSize={9} fontFamily={fontSans} transform={`rotate(-90 ${pad.left - 40} ${pad.top + chartH / 2})`}>Avg kW</text>
+        <text x={pad.left - 48} y={pad.top + chartH / 2} textAnchor="middle" fill={C.g500} fontSize={7} fontFamily={fontSans} transform={`rotate(-90 ${pad.left - 48} ${pad.top + chartH / 2})`}>Avg kW</text>
         {/* Y ticks */}
         {[0, 0.5, 1].map((f) => (
           <text key={f} x={pad.left - 12} y={pad.top + chartH - f * chartH + 3} textAnchor="end" fill={C.g500} fontSize={9} fontFamily={fontSans}>{(maxKw * f).toFixed(1)}</text>
@@ -777,7 +947,7 @@ function SeasonalChart({ monthlyKWh, labels = MONTHS, color = C.gold, height = 2
           <text key={i} x={pad.left + (i + 0.5) * (chartW / 12)} y={h - 6} textAnchor="middle" fill={C.g500} fontSize={9} fontFamily={fontSans}>{label}</text>
         ))}
       </svg>
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 4, fontSize: 10, color: C.g500, fontFamily: fontSans }}>
+      <div style={{ display: "flex", justifyContent: "center", marginTop: 4, fontSize: 11, color: C.g500, fontFamily: fontSans }}>
         <span>Time (month)</span>
       </div>
     </div>
@@ -804,8 +974,8 @@ function calcShadow(lat, month, hour, obstH, obstD) {
 // ═════════════════════════════════════════════════════════════════════
 // MAIN APPLICATION
 // ═════════════════════════════════════════════════════════════════════
-export default function JantaProposal() {
-  const [step, setStep] = useState(0); // 0=bill, 1=system, 2=shadow, 3=proposal
+export default function JantaProposal({ onOpenSettings, initialDarkMode = false, onDarkModeChange }) {
+  const [step, setStep] = useState(0); // 0=bill, 1=system, 2=pricing, 3=financials, 4=shadow, 5=proposal
 
   // ── Extracted / editable customer data ──
   const [custName, setCustName] = useState("");
@@ -821,6 +991,7 @@ export default function JantaProposal() {
   // ── Bill data ──
   const [billText, setBillText] = useState("");
   const [billFileName, setBillFileName] = useState("");
+  const [billFileNames, setBillFileNames] = useState([]);
   const [billUploadError, setBillUploadError] = useState("");
   const [billUploadLoading, setBillUploadLoading] = useState(false);
   const billInputRef = useRef(null);
@@ -829,10 +1000,39 @@ export default function JantaProposal() {
   const [monthlyKWh, setMonthlyKWh] = useState(new Array(12).fill(0));
   const [ratePerKWh, setRatePerKWh] = useState("0.12");
   const [rateEsc, setRateEsc] = useState("3");
+  const [productionOnlyMode, setProductionOnlyMode] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    try {
+      const stored = localStorage.getItem(THEME_KEY);
+      if (stored === "1") return true;
+      if (stored === "0") return false;
+    } catch (_err) {
+      // ignore storage read failures
+    }
+    return Boolean(initialDarkMode);
+  });
+  const [pdfLightMode, setPdfLightMode] = useState(false);
+  useEffect(() => {
+    if (typeof initialDarkMode === "boolean") {
+      setIsDarkMode(initialDarkMode);
+    }
+  }, [initialDarkMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(THEME_KEY, isDarkMode ? "1" : "0");
+    } catch (_err) {
+      // ignore storage write failures
+    }
+    if (typeof onDarkModeChange === "function") {
+      onDarkModeChange(isDarkMode);
+    }
+  }, [isDarkMode, onDarkModeChange]);
+
   const [extracted, setExtracted] = useState(false);
 
   // ── Region & System ──
-  const [region, setRegion] = useState("illinois");
+  const [region, setRegion] = useState("texas");
   /** Empty = auto (~60% offset); otherwise kW string, snapped to 5.4 kW steps for math. */
   const [systemSizeKw, setSystemSizeKw] = useState("");
   const [pricingPerKW, setPricingPerKW] = useState(String(DEFAULT_PRICING_PER_KW));
@@ -840,6 +1040,8 @@ export default function JantaProposal() {
   const [batteryCost, setBatteryCost] = useState("");
   const [generatorName, setGeneratorName] = useState("");
   const [generatorCost, setGeneratorCost] = useState("");
+  /** When false, battery + generator rows are collapsed; use “Add Battery or Generator” to expand. */
+  const [optionalEquipmentOpen, setOptionalEquipmentOpen] = useState(false);
 
   // ── NREL PVWatts (SAM-style) API ──
   const [useNrelApi, setUseNrelApi] = useState(false);
@@ -863,17 +1065,38 @@ export default function JantaProposal() {
   /** Empty = use PVWatts or regional default; otherwise percent (e.g. 23.1) */
   const [capacityFactorPct, setCapacityFactorPct] = useState("");
 
+  // ── Project Financials (Excel-guided) ──
+  const [finPricePerMw, setFinPricePerMw] = useState("1624000");
+  const [finIncentivePct, setFinIncentivePct] = useState("30");
+  const [finIncentiveAuto, setFinIncentiveAuto] = useState(true);
+  const [finMaintenancePerMwYear, setFinMaintenancePerMwYear] = useState("15000");
+  const [finEnergyValuePerMWh, setFinEnergyValuePerMWh] = useState("60");
+  const [finSavedLandValuePerAcre, setFinSavedLandValuePerAcre] = useState("0");
+  const [finSavedLandValueAuto, setFinSavedLandValueAuto] = useState(true);
+  const [finSavedLandValueSource, setFinSavedLandValueSource] = useState("Manual");
+  const [includeFinancialsInProposal, setIncludeFinancialsInProposal] = useState(false);
+  const [includeCapitalLessSavedLand, setIncludeCapitalLessSavedLand] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(
+    typeof window !== "undefined" ? window.innerWidth : 1280
+  );
+
   // ── Credits (state-based) ──
-  const [selState, setSelState] = useState("IL");
+  const [selState, setSelState] = useState("TX");
   const [stateManuallySet, setStateManuallySet] = useState(false);
-  const [stateEditorOpen, setStateEditorOpen] = useState(false);
   const [itcPct, setItcPct] = useState(30); // 0, 30, 40, 50, 60 — commercial can still get ITC
   const [ecOn, setEcOn] = useState(false);
   const [extraCreditName, setExtraCreditName] = useState("");
   const [extraCreditAmt, setExtraCreditAmt] = useState("");
   const [extraCredits, setExtraCredits] = useState([]);
   const [removedCreditKeys, setRemovedCreditKeys] = useState({});
-  const [stateIncentivesExpanded, setStateIncentivesExpanded] = useState(false);
+
+  const darkThemeActive = isDarkMode && !pdfLightMode;
+  const pageScale = Math.min(1.35, Math.max(1, (viewportWidth - 24) / 960));
+  const titleColor = darkThemeActive ? "#F8F2E8" : C.navy;
+  const proposalScreenDark = darkThemeActive && step === 5;
+  const chartProdColor = darkThemeActive ? "#F0C36A" : C.gold;
+  const chartUsageColor = darkThemeActive ? "#F8F2E8" : C.navy;
+  Object.assign(C, darkThemeActive ? DARK_C : LIGHT_C);
 
   // ── Shadow ──
   const [obstH, setObstH] = useState("8");
@@ -902,8 +1125,42 @@ export default function JantaProposal() {
   }, [custAddress, siteAddress, utilityName, selState, stateManuallySet]);
 
   useEffect(() => {
-    setStateIncentivesExpanded(false);
-  }, [selState]);
+    if (!finSavedLandValueAuto) return;
+    let cancelled = false;
+    (async () => {
+      let county = "";
+      let stateAbbr = selState;
+      const hints = parseAddressHints(custAddress || siteAddress);
+      const lat = Number.isFinite(siteLat) ? siteLat : hints.lat;
+      const lon = Number.isFinite(siteLon) ? siteLon : hints.lon;
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        try {
+          const rev = await reverseGeocodeCountyState(lat, lon);
+          county = rev.county || "";
+          stateAbbr = rev.stateAbbr || stateAbbr;
+        } catch (_err) {
+          // fall through to state/region fallback
+        }
+      }
+      const est = estimateSavedLandValuePerAcre({ county, stateAbbr, region });
+      if (!cancelled) {
+        setFinSavedLandValuePerAcre(String(est.value));
+        setFinSavedLandValueSource(est.source);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [finSavedLandValueAuto, siteLat, siteLon, custAddress, siteAddress, selState, region]);
+
+  useEffect(() => {
+    const pricePerKw = parseFloat(pricingPerKW) > 0 ? parseFloat(pricingPerKW) : DEFAULT_PRICING_PER_KW;
+    setFinPricePerMw(String(Math.round(pricePerKw * 1000)));
+  }, [pricingPerKW]);
+
+  useEffect(() => {
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   // Fetch NREL PVWatts when API is on and we have a location (address coords or region)
   useEffect(() => {
@@ -997,26 +1254,39 @@ export default function JantaProposal() {
     setExtracted(true);
   }
 
-  async function handleBillFile(file) {
-    if (!file) return;
+  async function readBillFile(file) {
+    if (!file) return "";
+    if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+      return extractTextFromPdfFile(file);
+    }
+    if (file.type.startsWith("text/") || file.name.toLowerCase().endsWith(".txt")) {
+      return file.text();
+    }
+    throw new Error(`Unsupported file "${file.name}". Please upload PDF or TXT only.`);
+  }
+
+  async function handleBillFiles(filesLike) {
+    const files = Array.from(filesLike || []).filter(Boolean);
+    if (files.length === 0) return;
     setBillUploadError("");
     setBillUploadLoading(true);
     try {
-      let text = "";
-      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-        text = await extractTextFromPdfFile(file);
-      } else if (file.type.startsWith("text/") || file.name.toLowerCase().endsWith(".txt")) {
-        text = await file.text();
-      } else {
-        throw new Error("Unsupported file. Please upload a PDF or TXT file.");
+      const parts = [];
+      const names = [];
+      for (const f of files) {
+        const text = await readBillFile(f);
+        if (!text || text.trim().length < 20) {
+          throw new Error(`Could not extract enough text from "${f.name}".`);
+        }
+        parts.push(text.trim());
+        names.push(f.name);
       }
-      if (!text || text.trim().length < 20) {
-        throw new Error("Could not extract enough bill text. Try another file or paste text manually.");
-      }
-      setBillText(text);
-      setBillFileName(file.name);
+      const merged = parts.join("\n\n--- NEXT BILL ---\n\n");
+      setBillText(merged);
+      setBillFileNames(names);
+      setBillFileName(names.length === 1 ? names[0] : `${names.length} files merged`);
     } catch (err) {
-      setBillUploadError(err?.message || "Failed to read bill file.");
+      setBillUploadError(err?.message || "Failed to read bill file(s).");
     } finally {
       setBillUploadLoading(false);
     }
@@ -1024,6 +1294,7 @@ export default function JantaProposal() {
 
   function clearBillFile() {
     setBillFileName("");
+    setBillFileNames([]);
     setBillUploadError("");
     if (billInputRef.current) billInputRef.current.value = "";
   }
@@ -1033,6 +1304,11 @@ export default function JantaProposal() {
     if (!el) return;
     setPdfExporting(true);
     try {
+      // Always export proposal PDF in light mode.
+      setPdfLightMode(true);
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
       const mod = await import("html2pdf.js");
       const html2pdf = mod.default || mod;
       const raw = (custName || custAddress || "proposal").trim();
@@ -1052,6 +1328,7 @@ export default function JantaProposal() {
     } catch (err) {
       window.alert(err?.message || "Could not generate PDF. Try again or use Print to PDF.");
     } finally {
+      setPdfLightMode(false);
       setPdfExporting(false);
     }
   }
@@ -1079,11 +1356,11 @@ export default function JantaProposal() {
   const effectiveMonthlyPerKW = hasManualCf
     ? baseMonthly.map((m) => Math.round(Number(m) * monthScale))
     : baseMonthly;
-  const cfSourceLabel = hasManualCf
-    ? "Custom"
+  const cfSourceSummaryText = hasManualCf
+    ? "Source: Custom (manual override)"
     : samData
-      ? "NREL PVWatts"
-      : `vs ${(reg.traditionalCF * 100).toFixed(1)}% traditional`;
+      ? "Source: NREL PVWatts (SAM)"
+      : `Source: Auto — ${reg.label} curve`;
   /** Step count closest to 60% offset (may be slightly above or below 60% once snapped to 5.4 kW). */
   const optimalSystemStep = useMemo(() => {
     if (!annualKWh || !effectiveAnnualPerKW || effectiveAnnualPerKW <= 0) return 1;
@@ -1110,11 +1387,14 @@ export default function JantaProposal() {
   const annualProd = Math.round(annualProdRaw);
   const requiredKwForFullOffset = effectiveAnnualPerKW > 0 ? annualKWh / effectiveAnnualPerKW : 0;
   const offsetPct = requiredKwForFullOffset > 0 ? Math.min((effectiveSize / requiredKwForFullOffset) * 100, 200) : 0;
-  const rate = parseFloat(ratePerKWh) || 0.12;
-  const annualSavings = Math.min(annualProd, annualKWh) * rate;
+  const offsetChipTone = offsetPct > 50 ? C.green : offsetPct < 50 ? C.red : C.navy;
+  const hasMonthlyUsageData = monthlyKWh.some((v) => Number(v) > 0);
+  const parsedRate = parseFloat(ratePerKWh);
+  const rate = productionOnlyMode ? 0 : (Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : 0.12);
+  const annualSavings = productionOnlyMode ? 0 : (Math.min(annualProd, annualKWh) * rate);
 
   // Credits - auto-populated from state
-  const stInc = STATE_INCENTIVES[selState] || STATE_INCENTIVES.IL;
+  const stInc = STATE_INCENTIVES[selState] || STATE_INCENTIVES.TX;
   const itcAmt = grossCost * (itcPct / 100);
   const ecAmt = ecOn ? grossCost * 0.10 : 0;
   // State tax credit
@@ -1141,6 +1421,12 @@ export default function JantaProposal() {
 
   const totalCredits = activeCreditItems.reduce((sum, item) => sum + (item.amount || 0), 0);
   const netCost = grossCost - totalCredits;
+  const autoFinIncentivePct = grossCost > 0 ? (totalCredits / grossCost) * 100 : 0;
+
+  useEffect(() => {
+    if (!finIncentiveAuto) return;
+    setFinIncentivePct(autoFinIncentivePct.toFixed(1));
+  }, [finIncentiveAuto, autoFinIncentivePct]);
 
   const itcCreditRemoved = !!removedCreditKeys.itc;
   const ecCreditRemoved = !!removedCreditKeys.energyCommunity;
@@ -1191,8 +1477,9 @@ export default function JantaProposal() {
   }
 
   // 25yr projection
-  const esc = parseFloat(rateEsc) || 3;
+  const esc = productionOnlyMode ? 0 : (parseFloat(rateEsc) || 3);
   const projection = useMemo(() => {
+    if (productionOnlyMode) return [];
     const rows = [];
     let cum = 0;
     for (let y = 1; y <= 25; y++) {
@@ -1203,13 +1490,73 @@ export default function JantaProposal() {
       rows.push({ y, prod: Math.round(prod), sav: Math.round(sav), cum: Math.round(cum), net: Math.round(cum - netCost) });
     }
     return rows;
-  }, [annualProd, annualKWh, rate, esc, netCost]);
+  }, [annualProd, annualKWh, rate, esc, netCost, productionOnlyMode]);
 
-  const breakEven = projection.find(r => r.net >= 0)?.y || "25+";
-  const savings25 = projection[24]?.cum || 0;
-  const roi = netCost > 0 ? ((annualSavings / netCost) * 100) : 0;
-  const landReq = Math.round(effectiveSize * 14.4);
-  const landCons = Math.round(effectiveSize * 36);
+  const breakEven = productionOnlyMode ? "N/A" : (projection.find(r => r.net >= 0)?.y || "25+");
+  const savings25 = productionOnlyMode ? 0 : (projection[24]?.cum || 0);
+  const roi = productionOnlyMode ? 0 : (netCost > 0 ? ((annualSavings / netCost) * 100) : 0);
+  // Excel-based land model:
+  // Space Required by Janta (acres) = (X MW * 1000) / 450
+  // Space Required by Fixed Tilt (acres) = (X MW * 1000) / 150
+  // Space Conserved (acres) = Fixed Tilt acres - Janta acres
+  const capacityMw = effectiveSize / 1000;
+  const jantaAcres = (capacityMw * 1000) / 450;
+  const fixedTiltAcres = (capacityMw * 1000) / 150;
+  const conservedAcres = Math.max(0, fixedTiltAcres - jantaAcres);
+  const landReq = Math.round(jantaAcres * SQFT_PER_ACRE);
+  const landCons = Math.round(conservedAcres * SQFT_PER_ACRE);
+  const sqftPerAcre = SQFT_PER_ACRE;
+  const formatArea = (sqft) => (
+    sqft > sqftPerAcre
+      ? `${(sqft / sqftPerAcre).toFixed(2)} Acres`
+      : `${sqft.toLocaleString()} Sq Ft`
+  );
+  const finCapacityMw = effectiveSize / 1000;
+  const finCapacityFactor = effectiveCF;
+  const finAnnualMWh = finCapacityMw * 8760 * finCapacityFactor;
+  const finMonthlyMWh = finAnnualMWh / 12;
+  const finPricePerMwNum = parseFloat(finPricePerMw) || 0;
+  const finIncentivePctNum = parseFloat(finIncentivePct) || 0;
+  const finMaintenancePerMwYearNum = parseFloat(finMaintenancePerMwYear) || 0;
+  const finEnergyValuePerMWhNum = parseFloat(finEnergyValuePerMWh) || 0;
+  const finProjectCost = finPricePerMwNum * finCapacityMw;
+  const finDeveloperCapitalCost = finProjectCost * (1 - (finIncentivePctNum / 100));
+  const finAnnualMaintenance = finMaintenancePerMwYearNum * finCapacityMw;
+  const finAnnualRevenue = finAnnualMWh * finEnergyValuePerMWhNum;
+  const finAnnualProfit = finAnnualRevenue - finAnnualMaintenance;
+  const finLifetimeRevenue = finAnnualRevenue * 25;
+  const finLifetimeProfit = finAnnualProfit * 25;
+  const finLifetimeRoiPct = finDeveloperCapitalCost > 0 ? (finLifetimeProfit / finDeveloperCapitalCost) * 100 : 0;
+  const finBreakEvenYears = finAnnualProfit > 0 ? (finDeveloperCapitalCost / finAnnualProfit) : null;
+  const finSavedLandValuePerAcreNum = parseFloat(finSavedLandValuePerAcre) || 0;
+  const finSavedLandValueTotal = conservedAcres * finSavedLandValuePerAcreNum;
+  const finCapitalLessSavedLand = Math.max(0, finDeveloperCapitalCost - finSavedLandValueTotal);
+  const finScenarioStart = Math.max(0, finEnergyValuePerMWhNum - 10);
+  const finScenarioPrices = Array.from({ length: 6 }, (_, i) => finScenarioStart + (i * 10));
+  const finScenarios = finScenarioPrices.map((price) => {
+    const annualRevenue = finAnnualMWh * price;
+    const annualProfit = annualRevenue - finAnnualMaintenance;
+    const lifetimeProfit = annualProfit * 25;
+    const yearsToBreakeven = annualProfit > 0 ? finDeveloperCapitalCost / annualProfit : null;
+    const annualRoiPct = finDeveloperCapitalCost > 0 ? (annualProfit / finDeveloperCapitalCost) * 100 : 0;
+    const yearsToBreakevenLessLand = annualProfit > 0 ? finCapitalLessSavedLand / annualProfit : null;
+    const annualRoiPctLessLand = finCapitalLessSavedLand > 0 ? (annualProfit / finCapitalLessSavedLand) * 100 : 0;
+    return {
+      price,
+      annualRevenue,
+      annualProfit,
+      lifetimeProfit,
+      yearsToBreakeven,
+      annualRoiPct,
+      yearsToBreakevenLessLand,
+      annualRoiPctLessLand,
+    };
+  });
+  const finFmtInt = (v) => Math.round(v || 0).toLocaleString();
+  const finFmtYears = (v) => (v == null || !Number.isFinite(v) ? "N/A" : v.toFixed(2));
+  const finFmtPct = (v) => `${(Number.isFinite(v) ? v : 0).toFixed(1)}%`;
+  const money = (v) => `$${Math.round(v || 0).toLocaleString()}`;
+  const finProposalCell = { textAlign: "right", padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: C.navy, fontFamily: fontSans };
 
   // Shadow
   const lat = reg.lat;
@@ -1224,39 +1571,274 @@ export default function JantaProposal() {
   const steps = [
     { label: "Bill Analysis", icon: "1" },
     { label: "System", icon: "2" },
-    { label: "Shadow Calc", icon: "3" },
-    { label: "Proposal", icon: "4" },
+    { label: "Project Pricing", icon: "3" },
+    { label: "Project Financials", icon: "4" },
+    { label: "Shadow Calc", icon: "5" },
+    { label: "Proposal", icon: "6" },
   ];
 
-  return (
-    <div style={{ fontFamily: fontSerif, background: C.offWhite, minHeight: "100vh", maxWidth: 960, margin: "0 auto" }}>
-      {/* HEADER */}
-      <div style={{ background: C.navy, padding: "20px 24px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ width: 34, height: 34, borderRadius: "50%", background: C.gold, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 900, color: C.navy }}>J</div>
-            <div>
-              <div style={{ fontSize: 17, fontWeight: 700, color: C.white, letterSpacing: "0.04em" }}>JANTA POWER</div>
-              <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 10, fontFamily: fontSans }}>Proposal Generator</div>
+  const pdfAvoid = { breakInside: "avoid", pageBreakInside: "avoid" };
+  const renderSystemCostsSection = (pdfMode) => {
+    const avoid = pdfMode ? pdfAvoid : {};
+    const pad = pdfMode ? 24 : 20;
+    const h3Size = pdfMode ? 16 : 15;
+    const title = pdfMode ? "System Costs" : "System Costs (Preview)";
+    const summaryDark = darkThemeActive && (!pdfMode || proposalScreenDark);
+    const inner = (
+      <div
+        style={{
+          background: C.white,
+          borderRadius: 10,
+          padding: pad,
+          border: `1px solid ${C.g200}`,
+          ...avoid,
+        }}
+      >
+        <h3 style={{ margin: "0 0 14px 0", fontSize: h3Size, fontWeight: 700, color: titleColor }}>{title}</h3>
+
+        <div style={{ background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: 12, ...avoid }}>
+          <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
+            Base System Price
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, fontFamily: fontSans }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ color: C.g500 }}>System Size</span>
+              <span style={{ color: C.navy, fontWeight: 700 }}>{effectiveSize} kW</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ color: C.g500 }}>Price per kW</span>
+              <span style={{ color: C.navy, fontWeight: 700 }}>${Math.round(costPerKW).toLocaleString()}</span>
+            </div>
+            <div style={{ borderTop: `1px dashed ${C.g200}`, marginTop: 2, paddingTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ color: C.blue, fontWeight: 700 }}>System Total (Solar PV)</span>
+              <span style={{ color: C.blue, fontWeight: 700, fontFamily: fontSans }}>${Math.round(solarGross).toLocaleString()}</span>
             </div>
           </div>
-          {effectiveSize > 0 && annualKWh > 0 && (
-            <div style={{ color: C.gold, fontSize: 13, fontFamily: fontSans, fontWeight: 600 }}>
-              {effectiveSize} kW · {offsetPct.toFixed(0)}% offset
+        </div>
+
+        {(batteryAdd > 0 || generatorAdd > 0) && (
+          <div style={{ marginTop: 12, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: 12, ...avoid }}>
+            <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
+              Battery & Generator
             </div>
+            {batteryAdd > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: generatorAdd > 0 ? `1px dashed ${C.g200}` : "none", fontSize: 12 }}>
+                <span style={{ color: C.g700 }}>{batteryName.trim() || "Battery Storage"}</span>
+                <span style={{ color: C.navy, fontFamily: fontSans, fontWeight: 700 }}>${Math.round(batteryAdd).toLocaleString()}</span>
+              </div>
+            )}
+            {generatorAdd > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
+                <span style={{ color: C.g700 }}>{generatorName.trim() || "Generator"}</span>
+                <span style={{ color: C.navy, fontFamily: fontSans, fontWeight: 700 }}>${Math.round(generatorAdd).toLocaleString()}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ marginTop: 12, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: 12, ...avoid }}>
+          <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
+            Applied Credits & Incentives
+          </div>
+          {activeCreditItems.length === 0 ? (
+            <div style={{ color: C.g500, fontSize: 12, fontFamily: fontSans }}>No credits currently applied.</div>
+          ) : (
+            activeCreditItems.map((item, i) => (
+              <div key={`${item.key}-${i}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: i < activeCreditItems.length - 1 ? `1px dashed ${C.g200}` : "none", fontSize: 12 }}>
+                <span style={{ color: C.g700 }}>{item.detailLabel}</span>
+                <span style={{ color: C.green, fontFamily: fontSans, fontWeight: 700 }}>-${Math.round(item.amount).toLocaleString()}</span>
+              </div>
+            ))
           )}
+        </div>
+
+        <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, ...avoid }}>
+          <div style={{ background: summaryDark ? "#22180F" : C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: "10px 12px" }}>
+            <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Gross</div>
+            <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>${Math.round(grossCost).toLocaleString()}</div>
+          </div>
+          <div style={{ background: summaryDark ? "#1E2A20" : "#ECF8F5", border: summaryDark ? `1px solid ${C.g200}` : "1px solid #CBECE4", borderRadius: 8, padding: "10px 12px" }}>
+            <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Credits</div>
+            <div style={{ color: C.green, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>-${Math.round(totalCredits).toLocaleString()}</div>
+          </div>
+          <div style={{ background: summaryDark ? C.gold : C.navy, border: `1px solid ${summaryDark ? C.goldLight : C.navy}`, borderRadius: 8, padding: "10px 12px" }}>
+            <div style={{ color: summaryDark ? "#3A2A15" : "rgba(255,255,255,0.7)", fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Net Cost</div>
+            <div style={{ color: summaryDark ? "#1D130A" : "#F8F2E8", fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>${Math.round(netCost).toLocaleString()}</div>
+          </div>
+        </div>
+      </div>
+    );
+    if (pdfMode) return inner;
+    return (
+      <div
+        style={{
+          borderRadius: 12,
+          border: `2px dashed ${C.blue}`,
+          background: darkThemeActive
+            ? "linear-gradient(180deg, #19140F 0%, #110D0A 100%)"
+            : "linear-gradient(180deg, #E8F2F8 0%, #F5F9FC 100%)",
+          padding: 14,
+          boxShadow: "inset 0 1px 0 rgba(255,255,255,0.8)",
+        }}
+      >
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12, paddingBottom: 12, borderBottom: `1px dashed ${C.blue}55` }}>
+          <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: titleColor, fontFamily: fontSans, background: darkThemeActive ? "#16110D" : C.white, padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.blue}66` }}>
+            Proposal preview
+          </span>
+          <span style={{ fontSize: 11, color: C.g500, fontFamily: fontSans, lineHeight: 1.4, maxWidth: 320, textAlign: "right" }}>
+            This block mirrors the <strong style={{ color: titleColor }}>System Costs</strong> section on the PDF.
+          </span>
+        </div>
+        {inner}
+      </div>
+    );
+  };
+  const renderProposalPreviewShell = (mirrorLabel, content) => (
+    <div
+      style={{
+        borderRadius: 12,
+        border: `2px dashed ${C.blue}`,
+        background: darkThemeActive
+          ? "linear-gradient(180deg, #19140F 0%, #110D0A 100%)"
+          : "linear-gradient(180deg, #E8F2F8 0%, #F5F9FC 100%)",
+        padding: 14,
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.8)",
+      }}
+    >
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12, paddingBottom: 12, borderBottom: `1px dashed ${C.blue}55` }}>
+        <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: titleColor, fontFamily: fontSans, background: darkThemeActive ? "#16110D" : C.white, padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.blue}66` }}>
+          Proposal preview
+        </span>
+        <span style={{ fontSize: 11, color: C.g500, fontFamily: fontSans, lineHeight: 1.4, maxWidth: 340, textAlign: "right" }}>
+          This block mirrors the <strong style={{ color: titleColor }}>{mirrorLabel}</strong> section on the PDF.
+        </span>
+      </div>
+      {content}
+    </div>
+  );
+
+  return (
+    <div
+      className="janta-app-root"
+      style={{
+        fontFamily: fontSerif,
+        background: darkThemeActive ? "#000000" : C.offWhite,
+        minHeight: "100vh",
+        width: 960,
+        maxWidth: "calc(100vw - 24px)",
+        margin: "0 auto",
+        zoom: pageScale,
+      }}
+    >
+      <style>{`
+        .janta-app-root,
+        .janta-app-root * {
+          transition:
+            background-color 280ms ease,
+            color 280ms ease,
+            border-color 280ms ease,
+            box-shadow 280ms ease,
+            fill 280ms ease,
+            stroke 280ms ease;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .janta-app-root,
+          .janta-app-root * {
+            transition: none !important;
+          }
+        }
+
+        .janta-app-root input::placeholder,
+        .janta-app-root textarea::placeholder {
+          color: ${darkThemeActive ? "#D8C6AE" : C.g500};
+          opacity: 1;
+        }
+      `}</style>
+      {/* HEADER */}
+      <div
+        style={{
+          background: C.navy,
+          padding: "14px 24px 12px",
+          boxShadow: `0 0 0 100vmax ${C.navy}`,
+          clipPath: "inset(0 -100vmax)",
+        }}
+      >
+        <div style={{ marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <img
+            src="/assets/janta-logo-cropped.svg"
+            alt="Janta Power"
+            style={{ height: 42, width: "auto", display: "block", objectFit: "contain" }}
+          />
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => setIsDarkMode((v) => !v)}
+              aria-label={isDarkMode ? "Switch to light mode" : "Switch to dark mode"}
+              title={isDarkMode ? "Dark mode" : "Light mode"}
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 8,
+                border: `1px solid ${isDarkMode ? "rgba(211,161,74,0.8)" : "rgba(255,255,255,0.28)"}`,
+                background: isDarkMode
+                  ? "linear-gradient(180deg, #1A1711 0%, #0F0F0F 100%)"
+                  : "rgba(255,255,255,0.08)",
+                boxShadow: isDarkMode
+                  ? "0 0 0 1px rgba(211,161,74,0.2) inset, 0 0 12px rgba(211,161,74,0.18)"
+                  : "none",
+                color: isDarkMode ? C.goldLight : C.white,
+                cursor: "pointer",
+                fontSize: 16,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                lineHeight: 1,
+                marginTop: 8,
+              }}
+            >
+              {isDarkMode ? "🌙" : "☀️"}
+            </button>
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              aria-label="Open settings"
+              title="Settings"
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 8,
+                border: "1px solid rgba(255,255,255,0.28)",
+                background: "rgba(255,255,255,0.08)",
+                color: "#F8F2E8",
+                cursor: "pointer",
+                fontSize: 16,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                lineHeight: 1,
+                marginTop: 8,
+              }}
+            >
+              ⚙
+            </button>
+          </div>
         </div>
         {/* Step nav */}
         <div style={{ display: "flex", gap: 4 }}>
           {steps.map((s, i) => (
             <button key={i} onClick={() => setStep(i)} style={{
-              flex: 1, padding: "10px 8px", border: "none", cursor: "pointer",
-              background: step === i ? C.white : step > i ? "rgba(200,168,78,0.15)" : "rgba(255,255,255,0.05)",
-              color: step === i ? C.navy : step > i ? C.gold : "rgba(255,255,255,0.4)",
+              flex: 1, padding: "10px 12px", border: "none", cursor: "pointer",
+              background: isDarkMode
+                ? (step === i ? C.gold : "#E3D2B8")
+                : step === i ? C.white : step > i ? "rgba(200,168,78,0.15)" : "rgba(255,255,255,0.05)",
+              color: isDarkMode
+                ? (step === i ? "#1B140D" : "#241A12")
+                : step === i ? C.navy : step > i ? C.gold : "rgba(255,255,255,0.4)",
               borderRadius: "6px 6px 0 0", fontSize: 12, fontFamily: fontSans,
               fontWeight: step === i ? 700 : 400, transition: "all 0.15s",
             }}>
-              <span style={{ display: "inline-block", width: 18, height: 18, lineHeight: "18px", borderRadius: "50%", background: step === i ? C.navy : "transparent", color: step === i ? C.white : "inherit", fontSize: 10, fontWeight: 700, textAlign: "center", marginRight: 5 }}>{s.icon}</span>
+              <span style={{ display: "inline-block", width: 18, height: 18, lineHeight: "18px", borderRadius: "50%", background: step === i ? C.navy : "transparent", color: step === i ? "#FFFFFF" : "inherit", fontSize: 10, fontWeight: 700, textAlign: "center", marginRight: 5 }}>{s.icon}</span>
               {s.label}
             </button>
           ))}
@@ -1268,26 +1850,32 @@ export default function JantaProposal() {
         {/* ═══ STEP 0: BILL ANALYSIS ═══ */}
         {step === 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ background: C.white, borderRadius: 10, padding: 14, border: `1px solid ${C.g200}` }}>
+              <Toggle label="Production-only proposal (no utility rate/escalation required)" checked={productionOnlyMode} onChange={setProductionOnlyMode} />
+            </div>
+
+            {!productionOnlyMode && (
             <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                <div style={{ width: 4, height: 18, background: C.navy, borderRadius: 2 }} />
-                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.navy }}>Upload or Paste Utility Bill</h3>
+                <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
+                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>Upload or Paste Utility Bill</h3>
               </div>
               <p style={{ color: C.g500, fontSize: 12, fontFamily: fontSans, margin: "0 0 10px 0" }}>
-                Drag and drop a bill PDF/TXT or paste text manually. The system will extract customer name, address, account number, usage history, and rate information automatically.
+                Drag and drop one or more bill PDF/TXT files (merge mode), or paste text manually. The system will extract customer name, address, account number, usage history, and rate information automatically.
               </p>
               <input
                 ref={billInputRef}
                 type="file"
+                multiple
                 accept=".pdf,.txt,text/plain,application/pdf"
                 style={{ display: "none" }}
-                onChange={(e) => handleBillFile(e.target.files?.[0])}
+                onChange={(e) => handleBillFiles(e.target.files)}
               />
               <div
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => {
                   e.preventDefault();
-                  handleBillFile(e.dataTransfer.files?.[0]);
+                  handleBillFiles(e.dataTransfer.files);
                 }}
                 onClick={() => billInputRef.current?.click()}
                 style={{
@@ -1304,8 +1892,13 @@ export default function JantaProposal() {
                   boxSizing: "border-box",
                 }}
               >
-                {billUploadLoading ? "Reading file..." : billFileName ? `Loaded: ${billFileName} (click to replace)` : "Drop bill file here or click to upload"}
+                {billUploadLoading ? "Reading file(s)..." : billFileName ? `Loaded: ${billFileName} (click to replace)` : "Drop bill file(s) here or click to upload"}
               </div>
+              {billFileNames.length > 1 && !billUploadLoading && (
+                <div style={{ marginBottom: 8, color: C.g500, fontSize: 11, fontFamily: fontSans }}>
+                  {billFileNames.join(", ")}
+                </div>
+              )}
               {billFileName && !billUploadLoading && (
                 <div style={{ marginBottom: 8 }}>
                   <button
@@ -1334,39 +1927,45 @@ export default function JantaProposal() {
               }} />
               <button onClick={handleExtract} disabled={billText.length < 20} style={{
                 marginTop: 10, padding: "10px 28px", background: billText.length >= 20 ? C.navy : C.g300,
-                color: C.white, border: "none", borderRadius: 6, cursor: billText.length >= 20 ? "pointer" : "default",
+                color: "#F8F2E8", border: "none", borderRadius: 6, cursor: billText.length >= 20 ? "pointer" : "default",
                 fontSize: 13, fontWeight: 600, fontFamily: fontSans,
               }}>
                 Extract Bill Data
               </button>
             </div>
+            )}
 
             {/* Extracted / Manual Entry */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
               <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                   <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
-                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.navy }}>Customer Information</h3>
+                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>Customer Information</h3>
                   {extracted && <span style={{ fontSize: 10, color: C.green, fontFamily: fontSans, background: `${C.green}11`, padding: "2px 8px", borderRadius: 10 }}>Auto-extracted</span>}
                 </div>
-                <Field label="Customer Name" value={custName} onChange={setCustName} placeholder="Kerry E Turk" />
-                <Field label="Service Address" value={custAddress} onChange={setCustAddress} placeholder="904 Woodlake Ct, O'Fallon IL 62269" wide />
+                <Field label="Customer Name" value={custName} onChange={setCustName} placeholder="Sean Simmons" />
+                <Field label="Service Address" value={custAddress} onChange={setCustAddress} placeholder="2265 Monitor St, Dallas TX, 75207" wide />
                 <div style={{ display: "flex", gap: 8 }}>
                   <Field label="Email" value={custEmail} onChange={setCustEmail} placeholder="email@example.com" />
-                  <Field label="Phone" value={custPhone} onChange={setCustPhone} placeholder="(618) 580-7300" />
+                  <Field label="Phone" value={custPhone} onChange={setCustPhone} placeholder="(123) 456-7890" />
                 </div>
-                <Field label="Account #" value={account} onChange={setAccount} placeholder="0888071057" />
-                <Field label="Utility" value={utilityName} onChange={setUtilityName} placeholder="Ameren Illinois" />
+                {!productionOnlyMode && (
+                  <>
+                    <Field label="Account #" value={account} onChange={setAccount} placeholder="0123456789" />
+                    <Field label="Utility" value={utilityName} onChange={setUtilityName} placeholder="TXU Energy" />
+                  </>
+                )}
                 <div style={{ display: "flex", gap: 8 }}>
-                  <Field label="Effective Rate" value={ratePerKWh} onChange={setRatePerKWh} type="number" unit="$/kWh" />
-                  <Field label="Rate Escalation" value={rateEsc} onChange={setRateEsc} type="number" unit="%/yr" />
+                  <Field label="Effective Rate" value={ratePerKWh} onChange={setRatePerKWh} type="number" unit="$/kWh" step={0.01} disabled={productionOnlyMode} />
+                  <Field label="Rate Escalation" value={rateEsc} onChange={setRateEsc} type="number" unit="%/yr" disabled={productionOnlyMode} />
                 </div>
               </div>
 
+              {!productionOnlyMode && (
               <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                  <div style={{ width: 4, height: 18, background: C.blue, borderRadius: 2 }} />
-                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.navy }}>Monthly Usage (kWh)</h3>
+                  <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
+                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>Monthly Usage (kWh)</h3>
                 </div>
                 <p style={{ color: C.g500, fontSize: 11, fontFamily: fontSans, margin: "0 0 8px 0" }}>
                   {extracted && monthlyKWh.some(v => v > 0) ? "Values extracted from bill. Edit if needed." : "Enter 12 months of usage or paste bill to auto-fill."}
@@ -1374,7 +1973,7 @@ export default function JantaProposal() {
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
                   {MONTHS.map((m, i) => (
                     <div key={m} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                      <span style={{ color: C.g500, fontSize: 10, width: 24, fontFamily: fontSans }}>{m}</span>
+                      <span style={{ color: darkThemeActive ? C.g700 : C.g500, fontSize: 10, width: 24, fontFamily: fontSans }}>{m}</span>
                       <input type="number" value={monthlyKWh[i] || ""} onChange={e => handleManualKWh(i, e.target.value)}
                         placeholder="0" style={{
                           width: "100%", padding: "6px 6px", background: monthlyKWh[i] > 0 ? C.white : C.g100,
@@ -1390,294 +1989,341 @@ export default function JantaProposal() {
                     <BarChart
                       data={monthlyKWh.map((v) => Number(v) || 0)}
                       labels={MONTHS}
-                      color1={C.navy}
+                      color1={darkThemeActive ? C.goldLight : C.navy}
                       height={130}
-                      legend={[{ label: "Monthly Usage (kWh)", color: C.navy }]}
+                      legend={[{ label: "Monthly Usage (kWh)", color: darkThemeActive ? C.goldLight : C.navy }]}
                     />
                     <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                      <Metric label="Annual" value={annualKWh.toLocaleString()} sub="kWh" color={C.navy} />
-                      <Metric label="Monthly Avg" value={Math.round(annualKWh / 12).toLocaleString()} sub="kWh" />
+                      <Metric label="Annual" value={annualKWh.toLocaleString()} sub="kWh" color={darkThemeActive ? C.goldLight : C.navy} />
+                      <Metric label="Monthly Avg" value={Math.round(annualKWh / 12).toLocaleString()} sub="kWh" color={darkThemeActive ? C.g700 : C.navy} />
                       <Metric label="Annual Cost" value={`$${(annualKWh * rate).toLocaleString(undefined, { maximumFractionDigits: 0 })}`} color={C.red} />
                     </div>
                   </div>
                 )}
               </div>
+              )}
             </div>
 
-            {annualKWh > 0 && (
-              <button onClick={() => setStep(1)} style={{
-                padding: "12px 0", background: C.navy, color: C.white, border: "none",
-                borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans,
-              }}>
-                Continue to System Sizing →
-              </button>
-            )}
+            <button onClick={() => setStep(1)} style={{
+              padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none",
+              borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans,
+            }}>
+              Continue to System Sizing →
+            </button>
           </div>
         )}
 
         {/* ═══ STEP 1: SYSTEM ═══ */}
         {step === 1 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-              <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-                  <div style={{ width: 4, height: 18, background: C.navy, borderRadius: 2 }} />
-                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.navy }}>Region & System</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ background: C.white, borderRadius: 10, padding: "14px 16px", border: `1px solid ${C.g200}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <div style={{ width: 4, height: 16, background: C.gold, borderRadius: 2 }} />
+                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>Region & System</h3>
                 </div>
-                <div style={{ marginBottom: 10, background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: 10 }}>
-                  <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>Solar Region (Auto-detected)</label>
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 16, background: `${C.blue}22`, color: C.navy, fontFamily: fontSans, fontSize: 12, fontWeight: 600 }}>
-                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.blue }} />
-                    {REGIONS[region]?.label || "Illinois"}
-                  </div>
-                  <div style={{ marginTop: 8 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                      <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>
-                        State (for incentives): <span style={{ color: C.navy, fontWeight: 600 }}>{selState}</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setStateEditorOpen((v) => !v)}
-                        style={{ border: "none", background: "transparent", color: C.blue, cursor: "pointer", fontSize: 11, fontFamily: fontSans, padding: 0 }}
-                      >
-                        {stateEditorOpen ? "Hide" : "Edit"}
-                      </button>
-                    </div>
-                    {stateEditorOpen && (
-                      <>
-                        <select
-                          value={selState}
-                          onChange={(e) => { setSelState(e.target.value); setStateManuallySet(true); }}
-                          style={{
-                            width: "100%", padding: "8px 10px", background: C.white, border: `1px solid ${C.g200}`,
-                            borderRadius: 5, color: C.g700, fontSize: 13, fontFamily: fontSans, outline: "none",
-                          }}
-                        >
-                          {Object.entries(STATE_INCENTIVES).sort((a, b) => a[1].name.localeCompare(b[1].name)).map(([k, v]) => (
-                            <option key={k} value={k}>{v.name}</option>
-                          ))}
-                        </select>
-                        <div style={{ marginTop: 4, color: C.g500, fontSize: 10, fontFamily: fontSans }}>
-                          Auto-detected, but editable if address details are incomplete.
-                        </div>
-                      </>
-                    )}
+
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8, paddingBottom: 10, marginBottom: 10, borderBottom: `1px solid ${C.g200}` }}>
+                  <span style={{ color: C.g500, fontSize: 11, fontFamily: fontSans }}>Solar region (auto)</span>
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, background: darkThemeActive ? "rgba(228,190,114,0.18)" : `${C.gold}1F`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontFamily: fontSans, fontSize: 12, fontWeight: 600 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold, flexShrink: 0 }} />
+                    {REGIONS[region]?.label || "Texas (Dallas area)"}
                   </div>
                 </div>
-                {/* NREL PVWatts (SAM-style) API + address + SAM params */}
-                <div style={{ marginBottom: 10, padding: 10, background: C.g100, borderRadius: 8, border: `1px solid ${C.g200}` }}>
-                  <Toggle label="Use NREL PVWatts (SAM) API for production data" checked={useNrelApi} onChange={setUseNrelApi} />
+
+                <div style={{ marginBottom: 10, padding: "8px 10px", background: C.g100, borderRadius: 8, border: `1px solid ${C.g200}` }}>
+                  <Toggle label="NREL PVWatts (SAM) for production" checked={useNrelApi} onChange={setUseNrelApi} />
                   {useNrelApi && (
                     <>
-                      <Field label="NREL API Key" value={nrelApiKey} onChange={setNrelApiKey} type="password" placeholder="Or set VITE_NREL_API_KEY in .env" />
-                      <div style={{ marginTop: 8 }}>
-                        <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>Site address (for SAM location)</label>
+                      <Field label="NREL API key" value={nrelApiKey} onChange={setNrelApiKey} type="password" placeholder=".env or paste key" />
+                      <div style={{ marginTop: 6 }}>
+                        <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: fontSans }}>Site address</label>
                         <div style={{ display: "flex", gap: 6 }}>
-                          <input value={siteAddress} onChange={e => { setSiteAddress(e.target.value); setGeocodeError(null); }} placeholder="e.g. 904 Woodlake Ct, O'Fallon IL 62269" style={{ flex: 1, padding: "8px 10px", border: `1px solid ${C.g200}`, borderRadius: 5, fontSize: 13, fontFamily: fontSans }} />
-                          <button type="button" onClick={handleGeocode} disabled={geocodeLoading || !siteAddress?.trim()} style={{ padding: "8px 14px", background: siteAddress?.trim() && !geocodeLoading ? C.navy : C.g300, color: C.white, border: "none", borderRadius: 5, fontSize: 12, fontFamily: fontSans, cursor: siteAddress?.trim() && !geocodeLoading ? "pointer" : "default" }}>{geocodeLoading ? "…" : "Use address"}</button>
+                          <input value={siteAddress} onChange={e => { setSiteAddress(e.target.value); setGeocodeError(null); }} placeholder="Street, city, state ZIP" style={{ flex: 1, padding: "7px 10px", border: `1px solid ${C.g200}`, borderRadius: 5, fontSize: 13, fontFamily: fontSans }} />
+                          <button type="button" onClick={handleGeocode} disabled={geocodeLoading || !siteAddress?.trim()} style={{ padding: "7px 12px", background: siteAddress?.trim() && !geocodeLoading ? C.navy : C.g300, color: "#F8F2E8", border: "none", borderRadius: 5, fontSize: 12, fontFamily: fontSans, cursor: siteAddress?.trim() && !geocodeLoading ? "pointer" : "default", flexShrink: 0 }}>{geocodeLoading ? "…" : "Geocode"}</button>
                         </div>
-                        {siteLat != null && siteLon != null && <div style={{ fontSize: 11, color: C.green, fontFamily: fontSans, marginTop: 4 }}>Location: {siteLat.toFixed(4)}°, {siteLon.toFixed(4)}°</div>}
-                        {geocodeError && <div style={{ fontSize: 11, color: C.red, fontFamily: fontSans, marginTop: 4 }}>{geocodeError}</div>}
+                        {siteLat != null && siteLon != null && <div style={{ fontSize: 10, color: C.green, fontFamily: fontSans, marginTop: 3 }}>{siteLat.toFixed(4)}°, {siteLon.toFixed(4)}°</div>}
+                        {geocodeError && <div style={{ fontSize: 10, color: C.red, fontFamily: fontSans, marginTop: 3 }}>{geocodeError}</div>}
                       </div>
-                      <div style={{ marginTop: 8, marginBottom: 4 }}>
-                        <span style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>System design (match SAM)</span>
-                      </div>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 4 }}>
-                        <Field label="Tilt (°)" value={samTilt} onChange={setSamTilt} type="number" placeholder="60" />
-                        <Field label="Azimuth (°)" value={samAzimuth} onChange={setSamAzimuth} type="number" placeholder="180" />
-                        <div style={{ marginBottom: 8 }}>
-                          <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", fontFamily: fontSans }}>Tracking</label>
-                          <select value={samArrayType} onChange={e => setSamArrayType(Number(e.target.value))} style={{ width: "100%", padding: "8px 10px", border: `1px solid ${C.g200}`, borderRadius: 5, fontSize: 12, fontFamily: fontSans }}>
-                            {ARRAY_TYPES.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
-                          </select>
+                      <div style={{ marginTop: 8 }}>
+                        <div style={{ color: C.g500, fontSize: 10, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: fontSans }}>SAM inputs</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                          <Field label="Tilt (°)" value={samTilt} onChange={setSamTilt} type="number" placeholder="60" />
+                          <Field label="Azimuth (°)" value={samAzimuth} onChange={setSamAzimuth} type="number" placeholder="180" />
+                          <div style={{ marginBottom: 8 }}>
+                            <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", fontFamily: fontSans }}>Tracking</label>
+                            <select value={samArrayType} onChange={e => setSamArrayType(Number(e.target.value))} style={{ width: "100%", padding: "7px 10px", border: `1px solid ${C.g200}`, borderRadius: 5, fontSize: 12, fontFamily: fontSans }}>
+                              {ARRAY_TYPES.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+                            </select>
+                          </div>
+                          <div style={{ marginBottom: 8 }}>
+                            <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", fontFamily: fontSans }}>Module</label>
+                            <select value={samModuleType} onChange={e => setSamModuleType(Number(e.target.value))} style={{ width: "100%", padding: "7px 10px", border: `1px solid ${C.g200}`, borderRadius: 5, fontSize: 12, fontFamily: fontSans }}>
+                              {MODULE_TYPES.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+                            </select>
+                          </div>
+                          <Field label="DC/AC ratio" value={samDcAcRatio} onChange={setSamDcAcRatio} type="number" placeholder="1.0" />
+                          <Field label="Losses (%)" value={samLosses} onChange={setSamLosses} type="number" unit="%" placeholder="2" />
                         </div>
-                        <div style={{ marginBottom: 8 }}>
-                          <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", fontFamily: fontSans }}>Module type</label>
-                          <select value={samModuleType} onChange={e => setSamModuleType(Number(e.target.value))} style={{ width: "100%", padding: "8px 10px", border: `1px solid ${C.g200}`, borderRadius: 5, fontSize: 12, fontFamily: fontSans }}>
-                            {MODULE_TYPES.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
-                          </select>
-                        </div>
-                        <Field label="DC-to-AC ratio" value={samDcAcRatio} onChange={setSamDcAcRatio} type="number" placeholder="1.0" />
-                        <Field label="System losses (%)" value={samLosses} onChange={setSamLosses} type="number" unit="%" placeholder="2" />
                       </div>
-                      {samLoading && <div style={{ fontSize: 11, color: C.g500, fontFamily: fontSans }}>Loading PVWatts data…</div>}
-                      {samError && <div style={{ fontSize: 11, color: C.red, fontFamily: fontSans }}>{samError}</div>}
-                      {samData && !samLoading && <div style={{ fontSize: 11, color: C.green, fontFamily: fontSans }}>Using NREL PVWatts: {Math.round(effectiveAnnualPerKW).toLocaleString()} kWh/kW/yr</div>}
+                      {samLoading && <div style={{ fontSize: 10, color: C.g500, fontFamily: fontSans, marginTop: 4 }}>Loading PVWatts…</div>}
+                      {samError && <div style={{ fontSize: 10, color: C.red, fontFamily: fontSans, marginTop: 4 }}>{samError}</div>}
+                      {samData && !samLoading && <div style={{ fontSize: 10, color: C.green, fontFamily: fontSans, marginTop: 4 }}>PVWatts: {Math.round(effectiveAnnualPerKW).toLocaleString()} kWh/kW·yr</div>}
                     </>
                   )}
                 </div>
-                <div style={{ marginBottom: 10, background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 10, padding: 12 }}>
-                  <div style={{ color: C.g500, fontSize: 10, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>System Summary</div>
-                  <div style={{ marginTop: 4, color: offsetPct >= 80 ? C.green : C.gold, fontSize: 13, fontWeight: 600, fontFamily: fontSans }}>
-                    Offset: {offsetPct.toFixed(0)}%
-                  </div>
-                  <div style={{ marginTop: 10 }}>
-                    <Field
-                      label="System size (kW)"
-                      value={systemSizeKw}
-                      onChange={setSystemSizeKw}
-                      type="text"
-                      unit="kW"
-                      placeholder={annualKWh > 0 && effectiveAnnualPerKW > 0 ? optimalSystemKw.toFixed(1) : String(SYSTEM_SIZE_STEP_KW)}
-                      endSlot={
-                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                          <button
-                            type="button"
-                            disabled={systemSizeAtMinStep}
-                            onClick={() => {
-                              const next = Math.max(
-                                SYSTEM_SIZE_STEP_KW,
-                                Math.round((effectiveSize - SYSTEM_SIZE_STEP_KW) * 10) / 10
-                              );
-                              setSystemSizeKw(String(next));
-                            }}
-                            aria-label={`Subtract ${SYSTEM_SIZE_STEP_KW} kW`}
-                            title={`−${SYSTEM_SIZE_STEP_KW} kW`}
-                            style={systemSizeStepControlStyle(!systemSizeAtMinStep)}
-                          >
-                            −
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const next = Math.round((effectiveSize + SYSTEM_SIZE_STEP_KW) * 10) / 10;
-                              setSystemSizeKw(String(next));
-                            }}
-                            aria-label={`Add ${SYSTEM_SIZE_STEP_KW} kW`}
-                            title={`+${SYSTEM_SIZE_STEP_KW} kW`}
-                            style={systemSizeStepControlStyle(true)}
-                          >
-                            +
-                          </button>
-                        </div>
-                      }
-                    />
-                    <div style={{ marginTop: 4, color: C.g500, fontSize: 10, fontFamily: fontSans }}>
-                      Defaults to ~60% offset: Increases in {SYSTEM_SIZE_STEP_KW} kW steps.
+
+                <div style={{ padding: "10px", background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 8 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div>
+                      <Field
+                        label="System size"
+                        value={systemSizeKw}
+                        onChange={setSystemSizeKw}
+                        type="text"
+                        inlineUnit="kW"
+                        placeholder={annualKWh > 0 && effectiveAnnualPerKW > 0 ? optimalSystemKw.toFixed(1) : String(SYSTEM_SIZE_STEP_KW)}
+                        endSlot={
+                          <div style={{ display: "flex", gap: 4, alignItems: "center", flexShrink: 0 }}>
+                            <button
+                              type="button"
+                              disabled={systemSizeAtMinStep}
+                              onClick={() => {
+                                const next = Math.max(
+                                  SYSTEM_SIZE_STEP_KW,
+                                  Math.round((effectiveSize - SYSTEM_SIZE_STEP_KW) * 10) / 10
+                                );
+                                setSystemSizeKw(String(next));
+                              }}
+                              aria-label={`Subtract ${SYSTEM_SIZE_STEP_KW} kW`}
+                              title={`−${SYSTEM_SIZE_STEP_KW} kW`}
+                              style={systemSizeStepControlStyle(!systemSizeAtMinStep)}
+                            >
+                              −
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = Math.round((effectiveSize + SYSTEM_SIZE_STEP_KW) * 10) / 10;
+                                setSystemSizeKw(String(next));
+                              }}
+                              aria-label={`Add ${SYSTEM_SIZE_STEP_KW} kW`}
+                              title={`+${SYSTEM_SIZE_STEP_KW} kW`}
+                              style={systemSizeStepControlStyle(true)}
+                            >
+                              +
+                            </button>
+                          </div>
+                        }
+                      />
+                      <div style={{ marginTop: 2, color: C.g500, fontSize: 9, fontFamily: fontSans, lineHeight: 1.35 }}>
+                        Blank field → ~60% usage offset · adjust in {SYSTEM_SIZE_STEP_KW} kW steps
+                      </div>
+                    </div>
+                    <div>
+                      <Field
+                        label="Capacity factor"
+                        value={capacityFactorPct}
+                        onChange={setCapacityFactorPct}
+                        type="text"
+                        inlineUnit="%"
+                        placeholder={baseCF != null ? (baseCF * 100).toFixed(1) : "—"}
+                      />
+                      <div style={{ marginTop: 2, color: C.g500, fontSize: 9, fontFamily: fontSans, lineHeight: 1.35 }}>
+                        {hasManualCf ? "Clear to use auto again." : `Auto: ${cfSourceSummaryText.replace(/^Source: /, "")}. Override with %.`}
+                      </div>
                     </div>
                   </div>
-                  <div style={{ marginTop: 10 }}>
-                    <Field
-                      label="Capacity factor (%)"
-                      value={capacityFactorPct}
-                      onChange={setCapacityFactorPct}
-                      type="text"
-                      unit="%"
-                      placeholder={baseCF != null ? (baseCF * 100).toFixed(1) : "—"}
-                    />
+                  <div style={{ display: "flex", gap: 10, marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.g200}` }}>
+                    <Metric label="Offset" value={`${offsetPct.toFixed(0)}%`} sub="of annual usage" color={offsetChipTone} highlight />
+                    <Metric label="Annual production" value={annualProd.toLocaleString()} sub="kWh/yr" color={C.blue} highlight />
                   </div>
                 </div>
-                <div style={{ marginBottom: 10, padding: 10, background: C.g100, borderRadius: 8, border: `1px solid ${C.g200}` }}>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
-                      gap: 8,
-                      alignItems: "center",
-                      marginBottom: 4,
-                    }}
-                  >
-                    <Field
-                      label="Battery storage"
-                      value={batteryName}
-                      onChange={(v) => {
-                        setBatteryName(v);
-                        if (!v.trim()) {
-                          setBatteryCost("");
-                          return;
-                        }
-                        const hit = BATTERY_PRESETS.find((p) => p.label === v);
-                        if (hit?.cost != null) setBatteryCost(String(hit.cost));
-                      }}
-                      placeholder="Type or select…"
-                      shrink
-                      list="janta-battery-presets"
-                    />
-                    <Field label="Amount" value={batteryCost} onChange={setBatteryCost} type="number" unit="$" placeholder="0" shrink />
+              </div>
+
+              <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                  <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
+                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>System Additions</h3>
+                </div>
+                <div
+                  style={
+                    optionalEquipmentOpen
+                      ? { padding: 10, background: C.g100, borderRadius: 8, border: `1px solid ${C.g200}` }
+                      : { padding: 0, background: "transparent", border: "none" }
+                  }
+                >
+                  {!optionalEquipmentOpen ? (
                     <button
                       type="button"
-                      onClick={() => { setBatteryName(""); setBatteryCost(""); }}
-                      disabled={!batteryName.trim() && !String(batteryCost).trim()}
-                      aria-label="Clear battery"
-                      title="Clear battery"
+                      onClick={() => setOptionalEquipmentOpen(true)}
+                      aria-label="Add battery or generator"
                       style={{
-                        flexShrink: 0,
-                        alignSelf: "center",
-                        width: 28,
-                        height: 28,
+                        display: "block",
+                        width: "100%",
+                        boxSizing: "border-box",
+                        padding: "10px 16px",
+                        background: C.blue,
                         border: "none",
-                        background: "transparent",
-                        color: batteryName.trim() || String(batteryCost).trim() ? "#2f3e4d" : C.g300,
-                        fontSize: 20,
+                        borderRadius: 8,
+                        color: "#F8F2E8",
+                        fontSize: 12,
                         fontWeight: 600,
-                        lineHeight: 1,
-                        padding: 0,
-                        cursor: batteryName.trim() || String(batteryCost).trim() ? "pointer" : "not-allowed",
                         fontFamily: fontSans,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        opacity: batteryName.trim() || String(batteryCost).trim() ? 1 : 0.4,
+                        cursor: "pointer",
+                        textAlign: "center",
+                        appearance: "none",
+                        WebkitAppearance: "none",
+                        boxShadow: "none",
                       }}
                     >
-                      ×
+                      + Add Battery or Generator
                     </button>
-                  </div>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
-                      gap: 8,
-                      alignItems: "center",
-                      marginBottom: 0,
-                    }}
-                  >
-                    <Field
-                      label="Generator"
-                      value={generatorName}
-                      onChange={(v) => {
-                        setGeneratorName(v);
-                        if (!v.trim()) {
-                          setGeneratorCost("");
-                          return;
-                        }
-                        const hit = GENERATOR_PRESETS.find((p) => p.label === v);
-                        if (hit?.cost != null) setGeneratorCost(String(hit.cost));
-                      }}
-                      placeholder="Type or select…"
-                      shrink
-                      list="janta-generator-presets"
-                    />
-                    <Field label="Amount" value={generatorCost} onChange={setGeneratorCost} type="number" unit="$" placeholder="0" shrink />
-                    <button
-                      type="button"
-                      onClick={() => { setGeneratorName(""); setGeneratorCost(""); }}
-                      disabled={!generatorName.trim() && !String(generatorCost).trim()}
-                      aria-label="Clear generator"
-                      title="Clear generator"
-                      style={{
-                        flexShrink: 0,
-                        alignSelf: "center",
-                        width: 28,
-                        height: 28,
-                        border: "none",
-                        background: "transparent",
-                        color: generatorName.trim() || String(generatorCost).trim() ? "#2f3e4d" : C.g300,
-                        fontSize: 20,
-                        fontWeight: 600,
-                        lineHeight: 1,
-                        padding: 0,
-                        cursor: generatorName.trim() || String(generatorCost).trim() ? "pointer" : "not-allowed",
-                        fontFamily: fontSans,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        opacity: generatorName.trim() || String(generatorCost).trim() ? 1 : 0.4,
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
+                  ) : (
+                    <>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "stretch" }}>
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
+                            gap: 8,
+                            alignItems: "center",
+                            minWidth: 0,
+                          }}
+                        >
+                          <Field
+                            label="Battery storage"
+                            value={batteryName}
+                            onChange={(v) => {
+                              setBatteryName(v);
+                              if (!v.trim()) {
+                                setBatteryCost("");
+                                return;
+                              }
+                              const hit = BATTERY_PRESETS.find((p) => p.label === v);
+                              if (hit?.cost != null) setBatteryCost(String(hit.cost));
+                            }}
+                            placeholder="Type or select…"
+                            shrink
+                            list="janta-battery-presets"
+                          />
+                          <Field label="Amount" value={batteryCost} onChange={setBatteryCost} type="number" unit="$" placeholder="0" shrink />
+                          <button
+                            type="button"
+                            onClick={() => { setBatteryName(""); setBatteryCost(""); }}
+                            disabled={!batteryName.trim() && !String(batteryCost).trim()}
+                            aria-label="Clear battery"
+                            title="Clear battery"
+                            style={{
+                              flexShrink: 0,
+                              alignSelf: "center",
+                              width: 28,
+                              height: 28,
+                              border: "none",
+                              background: "transparent",
+                              color: batteryName.trim() || String(batteryCost).trim() ? "#2f3e4d" : C.g300,
+                              fontSize: 20,
+                              fontWeight: 600,
+                              lineHeight: 1,
+                              padding: 0,
+                              cursor: batteryName.trim() || String(batteryCost).trim() ? "pointer" : "not-allowed",
+                              fontFamily: fontSans,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              opacity: batteryName.trim() || String(batteryCost).trim() ? 1 : 0.4,
+                            }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
+                            gap: 8,
+                            alignItems: "center",
+                            minWidth: 0,
+                          }}
+                        >
+                          <Field
+                            label="Generator"
+                            value={generatorName}
+                            onChange={(v) => {
+                              setGeneratorName(v);
+                              if (!v.trim()) {
+                                setGeneratorCost("");
+                                return;
+                              }
+                              const hit = GENERATOR_PRESETS.find((p) => p.label === v);
+                              if (hit?.cost != null) setGeneratorCost(String(hit.cost));
+                            }}
+                            placeholder="Type or select…"
+                            shrink
+                            list="janta-generator-presets"
+                          />
+                          <Field label="Amount" value={generatorCost} onChange={setGeneratorCost} type="number" unit="$" placeholder="0" shrink />
+                          <button
+                            type="button"
+                            onClick={() => { setGeneratorName(""); setGeneratorCost(""); }}
+                            disabled={!generatorName.trim() && !String(generatorCost).trim()}
+                            aria-label="Clear generator"
+                            title="Clear generator"
+                            style={{
+                              flexShrink: 0,
+                              alignSelf: "center",
+                              width: 28,
+                              height: 28,
+                              border: "none",
+                              background: "transparent",
+                              color: generatorName.trim() || String(generatorCost).trim() ? "#2f3e4d" : C.g300,
+                              fontSize: 20,
+                              fontWeight: 600,
+                              lineHeight: 1,
+                              padding: 0,
+                              cursor: generatorName.trim() || String(generatorCost).trim() ? "pointer" : "not-allowed",
+                              fontFamily: fontSans,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              opacity: generatorName.trim() || String(generatorCost).trim() ? 1 : 0.4,
+                            }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.g200}` }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOptionalEquipmentOpen(false);
+                            setBatteryName("");
+                            setBatteryCost("");
+                            setGeneratorName("");
+                            setGeneratorCost("");
+                          }}
+                          aria-label="Close system additions"
+                          style={{
+                            display: "block",
+                            width: "100%",
+                            boxSizing: "border-box",
+                            padding: "8px 14px",
+                            background: C.white,
+                            border: `1px solid ${C.g200}`,
+                            borderRadius: 6,
+                            color: C.navy,
+                            fontSize: 12,
+                            fontWeight: 600,
+                            fontFamily: fontSans,
+                            cursor: "pointer",
+                            textAlign: "center",
+                          }}
+                        >
+                          Close section
+                        </button>
+                      </div>
+                    </>
+                  )}
                   <datalist id="janta-battery-presets">
                     <option value="">None</option>
                     {BATTERY_PRESETS.map((p) => (
@@ -1693,313 +2339,508 @@ export default function JantaProposal() {
                 </div>
               </div>
 
-              <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-                  <div style={{ width: 4, height: 18, background: C.green, borderRadius: 2 }} />
-                  <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.navy }}>Credits & Incentives</h3>
-                </div>
-                <div style={{ marginBottom: 12 }}>
-                  <Field
-                    label="Project Pricing"
-                    value={pricingPerKW}
-                    onChange={setPricingPerKW}
-                    type="number"
-                    unit="$/kW"
-                    placeholder="3000"
-                  />
-                </div>
-                {/* State info box — tags always; full notes on demand */}
-                <div style={{ background: "#F0F7FF", border: "1px solid #D0E3FF", borderRadius: 6, padding: 10, marginBottom: 10, fontSize: 11, color: C.g700, fontFamily: fontSans, lineHeight: 1.5 }}>
-                  <button
-                    type="button"
-                    id="state-incentives-toggle"
-                    aria-expanded={stateIncentivesExpanded}
-                    aria-controls="state-incentives-notes"
-                    onClick={() => setStateIncentivesExpanded((v) => !v)}
-                    style={{
-                      display: "flex",
-                      width: "100%",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: 8,
-                      padding: 0,
-                      margin: 0,
-                      border: "none",
-                      background: "transparent",
-                      cursor: "pointer",
-                      fontFamily: fontSans,
-                      textAlign: "left",
-                    }}
-                  >
-                    <span style={{ fontWeight: 600, color: C.navy, fontSize: 12 }}>{stInc.name} Incentives</span>
-                    <span style={{ fontSize: 10, color: C.blue, fontWeight: 600, flexShrink: 0 }}>{stateIncentivesExpanded ? "Hide" : "Details"}</span>
-                  </button>
-                  {stateIncentivesExpanded && (
-                    <div id="state-incentives-notes" role="region" aria-labelledby="state-incentives-toggle" style={{ marginTop: 8, color: C.g700, lineHeight: 1.5 }}>
-                      {stInc.notes}
-                    </div>
-                  )}
-                  <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-                    {stInc.propExempt && <span style={{ fontSize: 9, background: "#E8F5EC", color: C.green, padding: "2px 6px", borderRadius: 8 }}>Property Tax Exempt</span>}
-                    {stInc.salesExempt && <span style={{ fontSize: 9, background: "#E8F5EC", color: C.green, padding: "2px 6px", borderRadius: 8 }}>Sales Tax Exempt</span>}
-                    {stInc.srec && <span style={{ fontSize: 9, background: "#FFF8E8", color: "#A07C1C", padding: "2px 6px", borderRadius: 8 }}>SREC: ${stInc.srec.perMWh}/MWh</span>}
-                    {stInc.tax > 0 && <span style={{ fontSize: 9, background: "#F0E8FF", color: "#6B46C1", padding: "2px 6px", borderRadius: 8 }}>State Tax Credit: {(stInc.tax*100).toFixed(0)}%</span>}
-                    <span style={{ fontSize: 9, background: C.g100, color: C.g500, padding: "2px 6px", borderRadius: 8 }}>Net Metering: {stInc.netMetering}</span>
-                  </div>
-                </div>
-
-                {/* ITC controls */}
-                <div style={{ marginBottom: 8 }}>
-                  <div style={{ marginBottom: 6 }}>
-                    <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", fontFamily: fontSans }}>Federal ITC (Section 48E)</label>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-                      {[0, 30].map((r) => (
-                        <Pill
-                          key={r}
-                          active={r === 0 ? itcPct === 0 || itcCreditRemoved : itcPct === r && !itcCreditRemoved}
-                          onClick={() => {
-                            setItcPct(r);
-                            clearRemovedCreditKey("itc");
-                          }}
-                        >
-                          {r === 0 ? "None" : `${r}%`}
-                        </Pill>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                <div style={{ marginBottom: 8 }}>
-                  <div style={{ marginBottom: 6 }}>
-                    <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", fontFamily: fontSans }}>Energy Community Bonus (+10%)</label>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-                      <Pill
-                        active={!ecOn || ecCreditRemoved}
-                        onClick={() => {
-                          setEcOn(false);
-                          clearRemovedCreditKey("energyCommunity");
-                        }}
-                      >
-                        None
-                      </Pill>
-                      <Pill
-                        active={ecOn && !ecCreditRemoved}
-                        onClick={() => {
-                          setEcOn(true);
-                          clearRemovedCreditKey("energyCommunity");
-                        }}
-                      >
-                        +10%
-                      </Pill>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
-                    gap: 8,
-                    marginTop: 6,
-                    alignItems: "end",
-                    marginBottom: 8,
-                  }}
-                >
-                  <Field label="Other Credit" value={extraCreditName} onChange={setExtraCreditName} placeholder="Name" shrink />
-                  <Field label="Amount" value={extraCreditAmt} onChange={setExtraCreditAmt} type="number" unit="$" shrink />
-                  <button
-                    type="button"
-                    onClick={addExtraCredit}
-                    disabled={!extraCreditName.trim() || !(parseFloat(extraCreditAmt) > 0)}
-                    aria-label="Add credit"
-                    title="Add credit"
-                    style={{
-                      flexShrink: 0,
-                      width: 30,
-                      height: 30,
-                      marginBottom: 8,
-                      borderRadius: 6,
-                      border: `1px solid ${C.g200}`,
-                      background: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? C.blue : C.g300,
-                      color: C.white,
-                      fontSize: 18,
-                      fontWeight: 700,
-                      lineHeight: 1,
-                      padding: 0,
-                      cursor: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? "pointer" : "default",
-                      fontFamily: fontSans,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      opacity: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? 1 : 0.5,
-                    }}
-                  >
-                    +
-                  </button>
-                </div>
-                {Object.keys(removedCreditKeys).length > 0 && (
-                  <div style={{ marginBottom: 8 }}>
-                    <button type="button" onClick={restoreAllAutoCredits} style={{ background: "transparent", border: "none", color: C.blue, fontSize: 11, fontFamily: fontSans, cursor: "pointer", padding: 0 }}>
-                      Restore removed auto-credits
-                    </button>
-                  </div>
-                )}
-
-                {/* Summary */}
-                <div style={{ background: C.g100, borderRadius: 8, padding: 12, border: `1px solid ${C.g200}` }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, fontFamily: fontSans }}>
-                    <span style={{ color: C.g500 }}>Solar PV</span>
-                    <span style={{ color: C.g700, fontWeight: 500 }}>${Math.round(solarGross).toLocaleString()}</span>
-                  </div>
-                  {batteryAdd > 0 && (
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, fontFamily: fontSans }}>
-                      <span style={{ color: C.g500, display: "inline-flex", alignItems: "center", gap: 8 }}>
-                        <button
-                          type="button"
-                          onClick={() => { setBatteryName(""); setBatteryCost(""); }}
-                          aria-label="Remove battery"
-                          title="Remove battery"
-                          style={{
-                            width: 12,
-                            height: 12,
-                            minWidth: 12,
-                            flexShrink: 0,
-                            border: "none",
-                            background: "transparent",
-                            color: "#2f3e4d",
-                            fontSize: 14,
-                            fontWeight: 700,
-                            lineHeight: "12px",
-                            padding: 0,
-                            cursor: "pointer",
-                            fontFamily: fontSans,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            boxSizing: "border-box",
-                          }}
-                        >
-                          ×
-                        </button>
-                        <span style={{ lineHeight: 1.25 }}>{batteryName.trim() || "Battery"}</span>
-                      </span>
-                      <span style={{ color: C.g700, fontWeight: 500 }}>${Math.round(batteryAdd).toLocaleString()}</span>
-                    </div>
-                  )}
-                  {generatorAdd > 0 && (
-                    <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, fontFamily: fontSans }}>
-                      <span style={{ color: C.g500, display: "inline-flex", alignItems: "center", gap: 8 }}>
-                        <button
-                          type="button"
-                          onClick={() => { setGeneratorName(""); setGeneratorCost(""); }}
-                          aria-label="Remove generator"
-                          title="Remove generator"
-                          style={{
-                            width: 12,
-                            height: 12,
-                            minWidth: 12,
-                            flexShrink: 0,
-                            border: "none",
-                            background: "transparent",
-                            color: "#2f3e4d",
-                            fontSize: 14,
-                            fontWeight: 700,
-                            lineHeight: "12px",
-                            padding: 0,
-                            cursor: "pointer",
-                            fontFamily: fontSans,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            boxSizing: "border-box",
-                          }}
-                        >
-                          ×
-                        </button>
-                        <span style={{ lineHeight: 1.25 }}>{generatorName.trim() || "Generator"}</span>
-                      </span>
-                      <span style={{ color: C.g700, fontWeight: 500 }}>${Math.round(generatorAdd).toLocaleString()}</span>
-                    </div>
-                  )}
-                  {[
-                    ...activeCreditItems.map((item) => [item.label, `-$${Math.round(item.amount).toLocaleString()}`, C.green, item.key, false]),
-                    ...Object.keys(removedCreditKeys).map((key) => {
-                      const removedLabelMap = {
-                        itc: `Federal ITC (${itcPct}%)`,
-                        stateTax: `${stInc.name} Tax Credit (${(stInc.tax * 100).toFixed(0)}%)`,
-                        srec: `${stInc.srec?.label || "SREC"} (${stInc.srec?.years || 0}yr)`,
-                        utility: utilRebateLabel || "Utility Rebate",
-                        energyCommunity: "Energy Community",
-                      };
-                      return [removedLabelMap[key] || "Removed credit", "$0", C.g500, key, true];
-                    }),
-                  ].filter(Boolean).map(([k, v, c, key], i) => (
-                    <div key={key != null ? String(key) : `row-${i}`} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, fontFamily: fontSans }}>
-                      <span style={{ color: C.g500, display: "inline-flex", alignItems: "center", gap: 8 }}>
-                        {key && (
-                          <button
-                            type="button"
-                            onClick={() => toggleCreditItem(key)}
-                            style={{
-                              width: 12,
-                              height: 12,
-                              minWidth: 12,
-                              flexShrink: 0,
-                              borderRadius: "50%",
-                              border: `1px solid ${removedCreditKeys[key] ? C.g300 : C.green}`,
-                              background: removedCreditKeys[key] ? C.white : C.green,
-                              cursor: "pointer",
-                              padding: 0,
-                              display: "inline-block",
-                              opacity: removedCreditKeys[key] ? 0.45 : 0.9,
-                              boxSizing: "border-box",
-                            }}
-                            title={removedCreditKeys[key] ? "Re-enable credit" : "Disable credit"}
-                          />
-                        )}
-                        <span style={{ lineHeight: 1.25 }}>{k}</span>
-                      </span>
-                      <span style={{ color: c, fontWeight: 500 }}>{v}</span>
-                    </div>
-                  ))}
-                  <div style={{ borderTop: `1px solid ${C.g300}`, marginTop: 6, paddingTop: 6, display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ color: C.navy, fontWeight: 700, fontSize: 13 }}>Net Cost</span>
-                    <span style={{ color: C.navy, fontWeight: 700, fontSize: 13, fontFamily: fontSans }}>${Math.round(netCost).toLocaleString()}</span>
-                  </div>
-                </div>
+            {renderProposalPreviewShell(
+              hasMonthlyUsageData ? "Janta Power Comparative Analysis" : "Janta Power Month-Month Production",
+              <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}` }}>
+                <h3 style={{ margin: "0 0 14px 0", fontSize: 18, fontWeight: 700, color: titleColor }}>
+                  {hasMonthlyUsageData ? "Janta Power Comparative Analysis" : "Janta Power Month-Month Production"}
+                </h3>
+                <BarChart
+                  data={monthlyProd}
+                  data2={monthlyKWh.some((v) => Number(v) > 0) ? monthlyKWh : undefined}
+                  labels={MONTHS}
+                  color1={chartProdColor}
+                  color2={chartUsageColor}
+                  height={175}
+                  showBarValues
+                  legend={
+                    monthlyKWh.some((v) => Number(v) > 0)
+                      ? [{ label: "Janta Energy Production (kWh)", color: chartProdColor }, { label: "Current Energy Usage", color: chartUsageColor }]
+                      : [{ label: "Janta Energy Production (kWh)", color: chartProdColor }]
+                  }
+                />
               </div>
-            </div>
+            )}
 
-            {/* Production metrics */}
-            <div style={{ display: "flex", gap: 10 }}>
-              <Metric label="Janta CF" value={`${(effectiveCF * 100).toFixed(1)}%`} sub={cfSourceLabel} color={C.green} highlight />
-              <Metric label="Annual Production" value={annualProd.toLocaleString()} sub="kWh/yr" color={C.blue} highlight />
-            </div>
-
-            {/* Chart */}
-            <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
-              <h3 style={{ margin: "0 0 12px 0", fontSize: 15, fontWeight: 700, color: C.navy }}>Janta Power Comparative Analysis</h3>
-              <BarChart data={monthlyKWh} data2={monthlyProd} labels={MONTHS}
-                color1={C.navy} color2={C.gold} height={180}
-                legend={[{ label: "Current Energy Usage", color: C.navy }, { label: "Janta Energy Production", color: C.gold }]} />
-              <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${C.g200}` }}>
-                <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={200} title="Seasonal production (time vs avg kW)" />
+            {renderProposalPreviewShell(
+              "Seasonal Production",
+              <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}` }}>
+                <h3 style={{ margin: "0 0 6px 0", fontSize: 18, fontWeight: 700, color: titleColor }}>Seasonal Production</h3>
+                <p style={{ color: C.g500, fontSize: 11, fontFamily: fontSans, margin: "0 0 14px 0" }}>
+                  Average power (kW) by month for the {effectiveSize} kW system{samData ? " — from NREL PVWatts" : ""}.
+                </p>
+                <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={155} title="" />
               </div>
-            </div>
+            )}
 
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setStep(0)} style={{ flex: 1, padding: "12px 0", background: C.white, color: C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back to Bill</button>
-              <button onClick={() => setStep(2)} style={{ flex: 2, padding: "12px 0", background: C.navy, color: C.white, border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Continue to Shadow Analysis →</button>
+              <button onClick={() => setStep(0)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back to Bill</button>
+              <button onClick={() => setStep(2)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Continue to Project Pricing →</button>
             </div>
           </div>
         )}
 
-        {/* ═══ STEP 2: SHADOW ═══ */}
+        {/* ═══ STEP 2: PROJECT PRICING ═══ */}
         {step === 2 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
+                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>Project Pricing</h3>
+              </div>
+              <div>
+                <Field
+                  value={pricingPerKW}
+                  onChange={setPricingPerKW}
+                  type="number"
+                  unit="$/kW"
+                  placeholder="3000"
+                />
+              </div>
+            </div>
+
+            <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
+                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>Credits & Incentives</h3>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ color: C.g500, fontSize: 11, fontFamily: fontSans, marginBottom: 4 }}>State for incentives:</div>
+                <select
+                  value={selState}
+                  onChange={(e) => { setSelState(e.target.value); setStateManuallySet(true); }}
+                  style={{
+                    width: "100%", padding: "8px 10px", background: C.cream, border: `1px solid ${C.g200}`,
+                    borderRadius: 5, color: C.g700, fontSize: 13, fontFamily: fontSans, outline: "none",
+                  }}
+                >
+                  {Object.entries(STATE_INCENTIVES).sort((a, b) => a[1].name.localeCompare(b[1].name)).map(([k, v]) => (
+                    <option key={k} value={k}>{v.name}</option>
+                  ))}
+                </select>
+                <div style={{ marginTop: 4, color: C.g500, fontSize: 10, fontFamily: fontSans }}>
+                  Auto-detected from the bill or site; change here if needed.
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 4, textTransform: "uppercase", fontFamily: fontSans }}>Federal ITC (48E)</label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                  {[0, 30].map((r) => (
+                    <Pill
+                      key={r}
+                      active={r === 0 ? itcPct === 0 || itcCreditRemoved : itcPct === r && !itcCreditRemoved}
+                      onClick={() => {
+                        setItcPct(r);
+                        clearRemovedCreditKey("itc");
+                      }}
+                    >
+                      {r === 0 ? "None" : `${r}%`}
+                    </Pill>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 4, textTransform: "uppercase", fontFamily: fontSans }}>Energy community (+10%)</label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                  <Pill
+                    active={!ecOn || ecCreditRemoved}
+                    onClick={() => {
+                      setEcOn(false);
+                      clearRemovedCreditKey("energyCommunity");
+                    }}
+                  >
+                    None
+                  </Pill>
+                  <Pill
+                    active={ecOn && !ecCreditRemoved}
+                    onClick={() => {
+                      setEcOn(true);
+                      clearRemovedCreditKey("energyCommunity");
+                    }}
+                  >
+                    +10%
+                  </Pill>
+                </div>
+              </div>
+
+              {(stInc.tax > 0 && grossCost > 0) || (stInc.srec && srecAmt > 0) || utilRebateAmt > 0 ? (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: C.g500, fontFamily: fontSans, marginBottom: 8 }}>Suggested ({stInc.name})</div>
+                  {stInc.tax > 0 && grossCost > 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "10px 12px",
+                        border: `1px solid ${C.g200}`,
+                        borderRadius: 8,
+                        marginBottom: 8,
+                        background: removedCreditKeys.stateTax ? C.g100 : C.white,
+                      }}
+                    >
+                      <span style={{ fontSize: 12, color: C.g700, fontFamily: fontSans, fontWeight: 600 }}>{stInc.name} tax credit ({(stInc.tax * 100).toFixed(0)}%)</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                        <span style={{ fontSize: 12, fontFamily: fontSans, fontWeight: 700, color: removedCreditKeys.stateTax ? C.g400 : C.green }}>
+                          {removedCreditKeys.stateTax ? "—" : `-$${Math.round(stateTaxAmt).toLocaleString()}`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => toggleCreditItem("stateTax")}
+                          style={{
+                            fontSize: 11,
+                            fontFamily: fontSans,
+                            fontWeight: 600,
+                            padding: "4px 10px",
+                            borderRadius: 6,
+                            border: `1px solid ${removedCreditKeys.stateTax ? C.blue : C.g200}`,
+                            background: C.white,
+                            color: removedCreditKeys.stateTax ? C.blue : C.g700,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {removedCreditKeys.stateTax ? "Add" : "Remove"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {stInc.srec && srecAmt > 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "10px 12px",
+                        border: `1px solid ${C.g200}`,
+                        borderRadius: 8,
+                        marginBottom: 8,
+                        background: removedCreditKeys.srec ? C.g100 : C.white,
+                      }}
+                    >
+                      <span style={{ fontSize: 12, color: C.g700, fontFamily: fontSans, fontWeight: 600 }}>{stInc.srec.label || "SREC"} ({stInc.srec.years} yr)</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                        <span style={{ fontSize: 12, fontFamily: fontSans, fontWeight: 700, color: removedCreditKeys.srec ? C.g400 : C.green }}>
+                          {removedCreditKeys.srec ? "—" : `-$${Math.round(srecAmt).toLocaleString()}`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => toggleCreditItem("srec")}
+                          style={{
+                            fontSize: 11,
+                            fontFamily: fontSans,
+                            fontWeight: 600,
+                            padding: "4px 10px",
+                            borderRadius: 6,
+                            border: `1px solid ${removedCreditKeys.srec ? C.blue : C.g200}`,
+                            background: C.white,
+                            color: removedCreditKeys.srec ? C.blue : C.g700,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {removedCreditKeys.srec ? "Add" : "Remove"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {utilRebateAmt > 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "10px 12px",
+                        border: `1px solid ${C.g200}`,
+                        borderRadius: 8,
+                        marginBottom: 8,
+                        background: removedCreditKeys.utility ? C.g100 : C.white,
+                      }}
+                    >
+                      <span style={{ fontSize: 12, color: C.g700, fontFamily: fontSans, fontWeight: 600 }}>{utilRebateLabel || "Utility rebate"}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                        <span style={{ fontSize: 12, fontFamily: fontSans, fontWeight: 700, color: removedCreditKeys.utility ? C.g400 : C.green }}>
+                          {removedCreditKeys.utility ? "—" : `-$${Math.round(utilRebateAmt).toLocaleString()}`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => toggleCreditItem("utility")}
+                          style={{
+                            fontSize: 11,
+                            fontFamily: fontSans,
+                            fontWeight: 600,
+                            padding: "4px 10px",
+                            borderRadius: 6,
+                            border: `1px solid ${removedCreditKeys.utility ? C.blue : C.g200}`,
+                            background: C.white,
+                            color: removedCreditKeys.utility ? C.blue : C.g700,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {removedCreditKeys.utility ? "Add" : "Remove"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
+              {extraCredits.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: C.g500, fontFamily: fontSans, marginBottom: 8 }}>Custom</div>
+                  {extraCredits.map((c) => (
+                    <div
+                      key={c.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "10px 12px",
+                        border: `1px solid ${C.g200}`,
+                        borderRadius: 8,
+                        marginBottom: 8,
+                        background: C.white,
+                      }}
+                    >
+                      <span style={{ fontSize: 12, color: C.g700, fontFamily: fontSans, fontWeight: 600 }}>{c.name || "Credit"}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                        <span style={{ fontSize: 12, fontFamily: fontSans, fontWeight: 700, color: C.green }}>-${Math.round(c.amount || 0).toLocaleString()}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeCreditItem(`extra:${c.id}`)}
+                          style={{
+                            fontSize: 11,
+                            fontFamily: fontSans,
+                            fontWeight: 600,
+                            padding: "4px 10px",
+                            borderRadius: 6,
+                            border: `1px solid ${C.g200}`,
+                            background: C.white,
+                            color: C.g700,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
+                  gap: 8,
+                  alignItems: "end",
+                  marginBottom: 8,
+                }}
+              >
+                <Field label="Add credit (name)" value={extraCreditName} onChange={setExtraCreditName} placeholder="e.g. County grant" shrink />
+                <Field label="Amount" value={extraCreditAmt} onChange={setExtraCreditAmt} type="number" unit="$" shrink />
+                <button
+                  type="button"
+                  onClick={addExtraCredit}
+                  disabled={!extraCreditName.trim() || !(parseFloat(extraCreditAmt) > 0)}
+                  aria-label="Add credit"
+                  title="Add credit"
+                  style={{
+                    flexShrink: 0,
+                    width: 30,
+                    height: 30,
+                    marginBottom: 8,
+                    borderRadius: 6,
+                    border: `1px solid ${C.g200}`,
+                    background: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? C.blue : C.g300,
+                    color: "#F8F2E8",
+                    fontSize: 18,
+                    fontWeight: 700,
+                    lineHeight: 1,
+                    padding: 0,
+                    cursor: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? "pointer" : "default",
+                    fontFamily: fontSans,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    opacity: extraCreditName.trim() && parseFloat(extraCreditAmt) > 0 ? 1 : 0.5,
+                  }}
+                >
+                  +
+                </button>
+              </div>
+              {Object.keys(removedCreditKeys).length > 0 && (
+                <button type="button" onClick={restoreAllAutoCredits} style={{ background: "transparent", border: "none", color: C.blue, fontSize: 11, fontFamily: fontSans, cursor: "pointer", padding: 0 }}>
+                  Restore all suggested credits
+                </button>
+              )}
+            </div>
+
+            {renderSystemCostsSection(false)}
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => setStep(1)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back to System</button>
+              <button onClick={() => setStep(3)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Continue to Project Financials →</button>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ STEP 3: PROJECT FINANCIALS ═══ */}
+        {step === 3 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ background: C.white, borderRadius: 10, padding: 14, border: `1px solid ${C.g200}` }}>
+              <Toggle label="Include Project Financials section on proposal" checked={includeFinancialsInProposal} onChange={setIncludeFinancialsInProposal} />
+              <Toggle label="Include 'Capital Invest Less Value of Saved Land' block" checked={includeCapitalLessSavedLand} onChange={setIncludeCapitalLessSavedLand} />
+            </div>
+
+            <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
+                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>Project Financials</h3>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <Field label="Price / MW" value={finPricePerMw} onChange={setFinPricePerMw} type="number" unit="$" disabled />
+                <Field
+                  label="Assumed Incentives"
+                  value={finIncentivePct}
+                  onChange={(v) => {
+                    setFinIncentiveAuto(false);
+                    setFinIncentivePct(v);
+                  }}
+                  type="number"
+                  unit="%"
+                  disabled={finIncentiveAuto}
+                  endSlot={(
+                    <button
+                      type="button"
+                      onClick={() => setFinIncentiveAuto((v) => !v)}
+                      style={{
+                        border: `1px solid ${C.g300}`,
+                        borderRadius: 999,
+                        background: finIncentiveAuto ? C.gold : C.white,
+                        color: finIncentiveAuto ? "#1B140D" : C.g700,
+                        padding: "4px 10px",
+                        fontSize: 10,
+                        fontFamily: fontSans,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        minWidth: 62,
+                      }}
+                    >
+                      {finIncentiveAuto ? "AUTO" : "CUSTOM"}
+                    </button>
+                  )}
+                />
+                <Field label="Maintenance ($ / MW / Year)" value={finMaintenancePerMwYear} onChange={setFinMaintenancePerMwYear} type="number" unit="$" />
+                <Field label="Value of Energy Produced" value={finEnergyValuePerMWh} onChange={setFinEnergyValuePerMWh} type="number" unit="$/MWh" />
+                {includeCapitalLessSavedLand && (
+                  <Field
+                    label="Value of Saved Land ($ / Acre)"
+                    value={finSavedLandValuePerAcre}
+                    onChange={(v) => { setFinSavedLandValuePerAcre(v); setFinSavedLandValueAuto(false); setFinSavedLandValueSource("Manual override"); }}
+                    type="number"
+                    unit="$"
+                  />
+                )}
+              </div>
+              {includeCapitalLessSavedLand && (
+                <div style={{ marginTop: 4, display: "flex", justifyContent: "space-between", alignItems: "center", color: C.g500, fontSize: 11, fontFamily: fontSans }}>
+                  <span>{finSavedLandValueSource}</span>
+                  <button
+                    type="button"
+                    onClick={() => setFinSavedLandValueAuto(true)}
+                    style={{ border: "none", background: "transparent", color: C.blue, fontSize: 11, fontFamily: fontSans, cursor: "pointer", padding: 0 }}
+                  >
+                    Re-auto estimate
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {includeFinancialsInProposal && (
+              renderProposalPreviewShell(
+                "Project Financials",
+                <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}` }}>
+                  <h3 style={{ margin: "0 0 12px 0", fontSize: 16, fontWeight: 700, color: titleColor }}>Project Financials</h3>
+                  <div style={{ overflowX: "auto", border: `1px solid ${C.g200}`, borderRadius: 8 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: fontSans, minWidth: 760 }}>
+                    <thead>
+                      <tr style={{ background: darkThemeActive ? "#211A14" : "#F1F5FB" }}>
+                        <th style={{ textAlign: "left", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Value of Energy Produced ($/MWh)</th>
+                        {finScenarios.map((s) => (
+                          <th key={`h-${s.price}`} style={{ textAlign: "right", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{s.price.toFixed(1)}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr style={{ background: darkThemeActive ? "#18120E" : "#F9FBFF" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#E3D7C8" : C.g700 }}>Annual Revenue</td>
+                        {finScenarios.map((s) => <td key={`ar-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy }}>{finFmtInt(s.annualRevenue)}</td>)}
+                      </tr>
+                      <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#E3D7C8" : C.g700 }}>Annual Maintenance Costs</td>
+                        {finScenarios.map((s) => <td key={`am-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy }}>{finFmtInt(finAnnualMaintenance)}</td>)}
+                      </tr>
+                      <tr style={{ background: darkThemeActive ? "#1A271F" : "#EEF7EE" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#D9F2E3" : C.navy, fontWeight: 700 }}>Annual Profit</td>
+                        {finScenarios.map((s) => <td key={`ap-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#D9F2E3" : C.navy, fontWeight: 700 }}>{finFmtInt(s.annualProfit)}</td>)}
+                      </tr>
+                      <tr style={{ background: darkThemeActive ? "#1F2E24" : "#E8F1E8" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#D9F2E3" : C.navy, fontWeight: 700 }}>Lifetime Profit</td>
+                        {finScenarios.map((s) => <td key={`lp-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#D9F2E3" : C.navy, fontWeight: 700 }}>{finFmtInt(s.lifetimeProfit)}</td>)}
+                      </tr>
+                      <tr style={{ background: darkThemeActive ? "#1A1714" : "#F7F7F7" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#E3D7C8" : C.g700, paddingTop: 10 }}>Developer Capital Investment</td>
+                        {finScenarios.map((s) => <td key={`dc-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, paddingTop: 10 }}>{finFmtInt(finDeveloperCapitalCost)}</td>)}
+                      </tr>
+                      <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
+                        {finScenarios.map((s) => <td key={`yb-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakeven)}</td>)}
+                      </tr>
+                      <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Annual ROI %</td>
+                        {finScenarios.map((s) => <td key={`ro-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPct)}</td>)}
+                      </tr>
+                      {includeCapitalLessSavedLand && (
+                        <>
+                          <tr style={{ background: darkThemeActive ? "#1A1714" : "#F7F7F7" }}>
+                            <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#E3D7C8" : C.g700, paddingTop: 10 }}>Capital Invest Less Value of Saved Land</td>
+                            {finScenarios.map((s) => <td key={`cl-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, paddingTop: 10 }}>{finFmtInt(finCapitalLessSavedLand)}</td>)}
+                          </tr>
+                          <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
+                            <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
+                            {finScenarios.map((s) => <td key={`y2-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakevenLessLand)}</td>)}
+                          </tr>
+                          <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
+                            <td style={{ padding: "6px 8px", color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Annual ROI %</td>
+                            {finScenarios.map((s) => <td key={`r2-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPctLessLand)}</td>)}
+                          </tr>
+                        </>
+                      )}
+                    </tbody>
+                  </table>
+                  </div>
+                </div>
+              )
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => setStep(2)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back</button>
+              <button onClick={() => setStep(4)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Continue to Shadow Analysis →</button>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ STEP 4: SHADOW ═══ */}
+        {step === 4 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
               <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
-                <h3 style={{ margin: "0 0 14px 0", fontSize: 15, fontWeight: 700, color: C.navy }}>Obstacle Parameters</h3>
+                <h3 style={{ margin: "0 0 14px 0", fontSize: 15, fontWeight: 700, color: titleColor }}>Obstacle Parameters</h3>
                 <Field label="Obstacle Height" value={obstH} onChange={setObstH} type="number" unit="meters" />
                 <Field label="Distance to Panels" value={obstD} onChange={setObstD} type="number" unit="meters" />
                 <div style={{ marginBottom: 8 }}>
@@ -2012,7 +2853,7 @@ export default function JantaProposal() {
                 </div>
               </div>
               <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
-                <h3 style={{ margin: "0 0 14px 0", fontSize: 15, fontWeight: 700, color: C.navy }}>Daily Shading — {MONTHS[shMonth]}</h3>
+                <h3 style={{ margin: "0 0 14px 0", fontSize: 15, fontWeight: 700, color: titleColor }}>Daily Shading — {MONTHS[shMonth]}</h3>
                 <div style={{ display: "flex", gap: 3, marginBottom: 14, flexWrap: "wrap" }}>
                   {hourly.map((h, i) => (
                     <div key={i} style={{
@@ -2034,50 +2875,50 @@ export default function JantaProposal() {
               </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setStep(1)} style={{ flex: 1, padding: "12px 0", background: C.white, color: C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back</button>
-              <button onClick={() => setStep(3)} style={{ flex: 2, padding: "12px 0", background: C.navy, color: C.white, border: "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Generate Proposal →</button>
+              <button onClick={() => setStep(3)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back</button>
+              <button onClick={() => setStep(5)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Generate Proposal →</button>
             </div>
           </div>
         )}
 
-        {/* ═══ STEP 3: PROPOSAL ═══ */}
-        {step === 3 && (
+        {/* ═══ STEP 5: PROPOSAL ═══ */}
+        {step === 5 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div ref={proposalPdfRef} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {/* Cover */}
-            <div style={{ background: C.navy, borderRadius: 10, padding: 28, color: C.white }}>
+            <div style={{ background: C.navy, borderRadius: 10, padding: 22, color: proposalScreenDark ? "#F8F2E8" : C.white, breakInside: "avoid", pageBreakInside: "avoid" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                 <div>
-                  <div style={{ position: "relative", height: 40, marginBottom: 14 }}>
+                  <div style={{ height: 50, marginBottom: 6, paddingLeft: 0, paddingTop: 0, overflow: "hidden" }}>
                     <img
                       src="/assets/janta-logo-cropped.svg"
                       alt="Janta Power"
                       style={{
-                        height: 40,
+                        height: 54,
                         width: "auto",
                         display: "block",
                         objectFit: "contain",
-                        position: "absolute",
-                        left: 0,
-                        top: -8,
+                        objectPosition: "left top",
+                        transform: "translate(-6px, -6px)",
                       }}
                     />
                   </div>
-                  <h2 style={{ margin: "0 0 4px 0", fontSize: 26, fontWeight: 700 }}>{custAddress || "Solar"} Proposal</h2>
-                  <p style={{ margin: 0, color: "rgba(255,255,255,0.5)", fontSize: 12, fontFamily: fontSans }}>{new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}</p>
+                  <h2 style={{ margin: "0 0 4px 0", fontSize: 26, fontWeight: 700, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{custAddress || "Solar"} Proposal</h2>
+                  <p style={{ margin: 0, color: proposalScreenDark ? "#D5C7B7" : "rgba(255,255,255,0.5)", fontSize: 12, fontFamily: fontSans }}>{new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}</p>
                 </div>
                 <div style={{ textAlign: "right", fontSize: 11, fontFamily: fontSans }}>
-                  <div style={{ color: "rgba(255,255,255,0.45)", marginBottom: 4 }}>Prepared For:</div>
-                  <div style={{ fontWeight: 600 }}>{custName || "—"}</div>
-                  <div style={{ color: "rgba(255,255,255,0.6)" }}>{custEmail} {custPhone}</div>
-                  <div style={{ color: "rgba(255,255,255,0.45)", marginTop: 10, marginBottom: 4 }}>Prepared By:</div>
-                  <div style={{ fontWeight: 600 }}>{prepBy}</div>
-                  <div style={{ color: "rgba(255,255,255,0.6)" }}>{prepEmail}</div>
-                  <div style={{ color: "rgba(255,255,255,0.6)" }}>{prepPhone}</div>
+                  <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginBottom: 4 }}>Prepared For:</div>
+                  <div style={{ fontWeight: 600, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{custName || "—"}</div>
+                  <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custEmail}</div>
+                  <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custPhone}</div>
+                  <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginTop: 10, marginBottom: 4 }}>Prepared By:</div>
+                  <div style={{ fontWeight: 600, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{prepBy}</div>
+                  <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepEmail}</div>
+                  <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepPhone}</div>
                 </div>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 20 }}>
-                {[[effectiveSize + " KW", "System Size"], ["25+ Yrs", "Lifespan"], [landReq + " Sq Ft", "Land Required"], [landCons + " Sq Ft", "Land Conserved"]].map(([v, l]) => (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 14 }}>
+                {[[effectiveSize + " KW", "System Size"], ["25+ Yrs", "Lifespan"], [formatArea(landReq), "Land Required"], [formatArea(landCons), "Land Conserved"]].map(([v, l]) => (
                   <div key={l} style={{ background: "rgba(255,255,255,0.07)", borderRadius: 6, padding: "12px 10px", textAlign: "center" }}>
                     <div style={{ fontSize: 18, fontWeight: 700, color: C.gold }}>{v}</div>
                     <div style={{ fontSize: 9, color: "rgba(255,255,255,0.45)", fontFamily: fontSans, marginTop: 2 }}>{l}</div>
@@ -2087,14 +2928,16 @@ export default function JantaProposal() {
             </div>
 
             {/* Financial */}
-            <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}` }}>
-              <h3 style={{ margin: "0 0 14px 0", fontSize: 18, fontWeight: 700, color: C.navy }}>Financial Breakdown</h3>
+            <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
+              <h3 style={{ margin: "0 0 14px 0", fontSize: 18, fontWeight: 700, color: titleColor }}>{productionOnlyMode ? "Production Breakdown" : "Financial Breakdown"}</h3>
               {[
-                ["25-Year Utility Savings", `$${(savings25 / 1000).toFixed(1)}K`],
-                ['Approximate "Break-Even"', `${breakEven} Years`],
-                ["Janta Power's Capacity Factor", `${(effectiveCF * 100).toFixed(1)}%${hasManualCf ? " (custom)" : samData ? " (NREL PVWatts)" : ` (${(reg.traditionalCF * 100).toFixed(1)}% for Traditional)`}`],
+                ...(!productionOnlyMode ? [
+                  ["25-Year Utility Savings", `$${Math.round(savings25).toLocaleString()}`],
+                  ['Approximate "Break-Even"', `${breakEven} Years`],
+                ] : []),
+                ["Janta Power's Capacity Factor", `${(effectiveCF * 100).toFixed(1)}%${samData ? " (NREL PVWatts)" : ` (${(reg.traditionalCF * 100).toFixed(1)}% for Traditional)`}`],
                 ["Annual Energy Production", `${annualProd.toLocaleString()} kWh`],
-                ["Annual Return on Investment", `${roi.toFixed(1)}%`],
+                ...(!productionOnlyMode ? [["Annual Return on Investment", `${roi.toFixed(1)}%`]] : []),
               ].map(([k, v]) => (
                 <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "10px 12px", borderBottom: `1px solid ${C.g200}` }}>
                   <span style={{ color: C.g700, fontSize: 13 }}>{k}</span>
@@ -2102,139 +2945,143 @@ export default function JantaProposal() {
                 </div>
               ))}
               <div style={{ marginTop: 16 }}>
-                <BarChart data={monthlyKWh} data2={monthlyProd} labels={MONTHS}
-                  color1={C.navy} color2={C.gold} height={170}
-                  legend={[{ label: "Current Energy Usage", color: C.navy }, { label: "Janta Energy Production", color: C.gold }]} />
+                <BarChart
+                  data={monthlyProd}
+                  data2={monthlyKWh.some((v) => Number(v) > 0) ? monthlyKWh : undefined}
+                  labels={MONTHS}
+                  color1={chartProdColor}
+                  color2={chartUsageColor}
+                  height={175}
+                  showBarValues
+                  legend={
+                    monthlyKWh.some((v) => Number(v) > 0)
+                      ? [{ label: "Janta Energy Production (kWh)", color: chartProdColor }, { label: "Current Energy Usage", color: chartUsageColor }]
+                      : [{ label: "Janta Energy Production (kWh)", color: chartProdColor }]
+                  }
+                />
               </div>
             </div>
 
             {/* Seasonal production (SAM): time vs kW */}
-            <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}` }}>
-              <h3 style={{ margin: "0 0 6px 0", fontSize: 18, fontWeight: 700, color: C.navy }}>Seasonal Production</h3>
+            <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
+              <h3 style={{ margin: "0 0 6px 0", fontSize: 18, fontWeight: 700, color: titleColor }}>Seasonal Production</h3>
               <p style={{ color: C.g500, fontSize: 11, fontFamily: fontSans, margin: "0 0 14px 0" }}>
-                Average power (kW) by month for the {effectiveSize} kW system{hasManualCf ? " (scaled to your capacity factor)" : samData ? " — from NREL PVWatts" : ""}.
+                Average power (kW) by month for the {effectiveSize} kW system{samData ? " — from NREL PVWatts" : ""}.
               </p>
-              <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={220} title="" />
+              <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={155} title="" />
             </div>
 
             {/* System Costs */}
-            <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}` }}>
-              <h3 style={{ margin: "0 0 14px 0", fontSize: 16, fontWeight: 700, color: C.navy }}>System Costs</h3>
+            {renderSystemCostsSection(true)}
 
-              <div style={{ background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: 12 }}>
-                <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
-                  Base System Price
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, fontFamily: fontSans }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ color: C.g500 }}>System Size</span>
-                    <span style={{ color: C.navy, fontWeight: 700 }}>{effectiveSize} kW</span>
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ color: C.g500 }}>Price per kW</span>
-                    <span style={{ color: C.navy, fontWeight: 700 }}>${Math.round(costPerKW).toLocaleString()}</span>
-                  </div>
-                  <div style={{ borderTop: `1px dashed ${C.g200}`, marginTop: 2, paddingTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ color: C.blue, fontWeight: 700 }}>System Total (Solar PV)</span>
-                    <span style={{ color: C.blue, fontWeight: 700, fontFamily: fontSans }}>${Math.round(solarGross).toLocaleString()}</span>
-                  </div>
+            {includeFinancialsInProposal && (
+              <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
+                <h3 style={{ margin: "0 0 12px 0", fontSize: 16, fontWeight: 700, color: titleColor }}>Project Financials</h3>
+                <div style={{ overflowX: "auto", border: `1px solid ${C.g200}`, borderRadius: 8 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: fontSans, minWidth: 760 }}>
+                    <thead>
+                      <tr style={{ background: proposalScreenDark ? "#211A14" : "#F1F5FB" }}>
+                        <th style={{ textAlign: "left", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Value of Energy Produced ($/MWh)</th>
+                        {finScenarios.map((s) => (
+                          <th key={`ph-${s.price}`} style={{ textAlign: "right", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{s.price.toFixed(1)}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr style={{ background: proposalScreenDark ? "#18120E" : "#F9FBFF" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#E3D7C8" : C.g700 }}>Annual Revenue</td>
+                        {finScenarios.map((s) => <td key={`par-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy }}>{finFmtInt(s.annualRevenue)}</td>)}
+                      </tr>
+                      <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#E3D7C8" : C.g700 }}>Annual Maintenance Costs</td>
+                        {finScenarios.map((s) => <td key={`pam-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy }}>{finFmtInt(finAnnualMaintenance)}</td>)}
+                      </tr>
+                      <tr style={{ background: proposalScreenDark ? "#1A271F" : "#EEF7EE" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#D9F2E3" : C.navy, fontWeight: 700 }}>Annual Profit</td>
+                        {finScenarios.map((s) => <td key={`pap-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#D9F2E3" : C.navy, fontWeight: 700 }}>{finFmtInt(s.annualProfit)}</td>)}
+                      </tr>
+                      <tr style={{ background: proposalScreenDark ? "#1F2E24" : "#E8F1E8" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#D9F2E3" : C.navy, fontWeight: 700 }}>Lifetime Profit</td>
+                        {finScenarios.map((s) => <td key={`plp-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#D9F2E3" : C.navy, fontWeight: 700 }}>{finFmtInt(s.lifetimeProfit)}</td>)}
+                      </tr>
+                      <tr style={{ background: proposalScreenDark ? "#1A1714" : "#F7F7F7" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#E3D7C8" : C.g700, paddingTop: 10 }}>Developer Capital Investment</td>
+                        {finScenarios.map((s) => <td key={`pdc-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, paddingTop: 10 }}>{finFmtInt(finDeveloperCapitalCost)}</td>)}
+                      </tr>
+                      <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
+                        {finScenarios.map((s) => <td key={`pyb-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakeven)}</td>)}
+                      </tr>
+                      <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Annual ROI %</td>
+                        {finScenarios.map((s) => <td key={`pro-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPct)}</td>)}
+                      </tr>
+                      {includeCapitalLessSavedLand && (
+                        <>
+                          <tr style={{ background: proposalScreenDark ? "#1A1714" : "#F7F7F7" }}>
+                            <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#E3D7C8" : C.g700, paddingTop: 10 }}>Capital Invest Less Value of Saved Land</td>
+                            {finScenarios.map((s) => <td key={`pcl-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, paddingTop: 10 }}>{finFmtInt(finCapitalLessSavedLand)}</td>)}
+                          </tr>
+                          <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
+                            <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
+                            {finScenarios.map((s) => <td key={`py2-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakevenLessLand)}</td>)}
+                          </tr>
+                          <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
+                            <td style={{ padding: "6px 8px", color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Annual ROI %</td>
+                            {finScenarios.map((s) => <td key={`pr2-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPctLessLand)}</td>)}
+                          </tr>
+                        </>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
-
-              {(batteryAdd > 0 || generatorAdd > 0) && (
-                <div style={{ marginTop: 12, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: 12 }}>
-                  <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
-                    Battery & Generator
-                  </div>
-                  {batteryAdd > 0 && (
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: generatorAdd > 0 ? `1px dashed ${C.g200}` : "none", fontSize: 12 }}>
-                      <span style={{ color: C.g700 }}>{batteryName.trim() || "Battery Storage"}</span>
-                      <span style={{ color: C.navy, fontFamily: fontSans, fontWeight: 700 }}>${Math.round(batteryAdd).toLocaleString()}</span>
-                    </div>
-                  )}
-                  {generatorAdd > 0 && (
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
-                      <span style={{ color: C.g700 }}>{generatorName.trim() || "Generator"}</span>
-                      <span style={{ color: C.navy, fontFamily: fontSans, fontWeight: 700 }}>${Math.round(generatorAdd).toLocaleString()}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div style={{ marginTop: 12, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: 12 }}>
-                <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
-                  Applied Credits & Incentives
-                </div>
-                {activeCreditItems.length === 0 ? (
-                  <div style={{ color: C.g500, fontSize: 12, fontFamily: fontSans }}>No credits currently applied.</div>
-                ) : (
-                  activeCreditItems.map((item, i) => (
-                    <div key={`${item.key}-${i}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: i < activeCreditItems.length - 1 ? `1px dashed ${C.g200}` : "none", fontSize: 12 }}>
-                      <span style={{ color: C.g700 }}>{item.detailLabel}</span>
-                      <span style={{ color: C.green, fontFamily: fontSans, fontWeight: 700 }}>-${Math.round(item.amount).toLocaleString()}</span>
-                    </div>
-                  ))
-                )}
-              </div>
-
-              <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                <div style={{ background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: "10px 12px" }}>
-                  <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Gross</div>
-                  <div style={{ color: C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>${Math.round(grossCost).toLocaleString()}</div>
-                </div>
-                <div style={{ background: "#ECF8F5", border: "1px solid #CBECE4", borderRadius: 8, padding: "10px 12px" }}>
-                  <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Credits</div>
-                  <div style={{ color: C.green, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>-${Math.round(totalCredits).toLocaleString()}</div>
-                </div>
-                <div style={{ background: C.navy, border: `1px solid ${C.navy}`, borderRadius: 8, padding: "10px 12px" }}>
-                  <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Net Cost</div>
-                  <div style={{ color: C.white, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>${Math.round(netCost).toLocaleString()}</div>
-                </div>
-              </div>
-            </div>
+            )}
 
             {/* 25yr Table */}
-            <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}` }}>
-              <h3 style={{ margin: "0 0 12px 0", fontSize: 15, fontWeight: 700, color: C.navy }}>25-Year Projection</h3>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: fontSans }}>
-                <thead><tr>{["Year", "Production", "Annual Savings", "Cumulative", "Net"].map(h => (
-                  <th key={h} style={{ color: C.g500, fontSize: 9, textTransform: "uppercase", padding: "6px 4px", textAlign: "right", borderBottom: `1px solid ${C.g200}` }}>{h}</th>
-                ))}</tr></thead>
-                <tbody>{projection.filter((_, i) => i < 5 || i === 9 || i === 14 || i === 19 || i === 24).map(r => (
-                  <tr key={r.y} style={{ background: r.net >= 0 ? "#F0FAF4" : "transparent" }}>
-                    <td style={{ padding: "5px 4px", textAlign: "right", color: C.g500 }}>{r.y}</td>
-                    <td style={{ padding: "5px 4px", textAlign: "right" }}>{r.prod.toLocaleString()}</td>
-                    <td style={{ padding: "5px 4px", textAlign: "right", color: C.green }}>${r.sav.toLocaleString()}</td>
-                    <td style={{ padding: "5px 4px", textAlign: "right", color: C.navy }}>${r.cum.toLocaleString()}</td>
-                    <td style={{ padding: "5px 4px", textAlign: "right", color: r.net >= 0 ? C.green : C.red, fontWeight: 600 }}>{r.net >= 0 ? "+" : ""}${r.net.toLocaleString()}</td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
+            {!productionOnlyMode && (
+              <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
+                <h3 style={{ margin: "0 0 12px 0", fontSize: 15, fontWeight: 700, color: titleColor }}>25-Year Projection</h3>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: fontSans }}>
+                  <thead><tr>{["Year", "Production", "Annual Savings", "Cumulative", "Net"].map(h => (
+                    <th key={h} style={{ color: C.g500, fontSize: 9, textTransform: "uppercase", padding: "6px 4px", textAlign: "right", borderBottom: `1px solid ${C.g200}` }}>{h}</th>
+                  ))}</tr></thead>
+                  <tbody>{projection.filter((_, i) => i < 5 || i === 9 || i === 14 || i === 19 || i === 24).map(r => (
+                    <tr key={r.y} style={{ background: r.net >= 0 ? (proposalScreenDark ? "#1A271F" : "#F0FAF4") : "transparent" }}>
+                      <td style={{ padding: "5px 4px", textAlign: "right", color: C.g500 }}>{r.y}</td>
+                      <td style={{ padding: "5px 4px", textAlign: "right", color: proposalScreenDark ? "#FFFFFF" : undefined }}>{r.prod.toLocaleString()}</td>
+                      <td style={{ padding: "5px 4px", textAlign: "right", color: C.green }}>${r.sav.toLocaleString()}</td>
+                      <td style={{ padding: "5px 4px", textAlign: "right", color: proposalScreenDark ? "#FFFFFF" : C.navy }}>${r.cum.toLocaleString()}</td>
+                      <td style={{ padding: "5px 4px", textAlign: "right", color: r.net >= 0 ? C.green : C.red, fontWeight: 600 }}>{r.net >= 0 ? "+" : ""}${r.net.toLocaleString()}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
 
             {/* Permissions + Signature */}
-            <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}` }}>
-              <h3 style={{ margin: "0 0 10px 0", fontSize: 15, fontWeight: 700, color: C.navy }}>Permissions and Details</h3>
+            <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
+              <h3 style={{ margin: "0 0 10px 0", fontSize: 15, fontWeight: 700, color: titleColor }}>Permissions and Details</h3>
               <p style={{ color: C.g700, fontSize: 12, lineHeight: 1.7, fontFamily: fontSans, margin: "0 0 14px 0" }}>
                 For this project, we will obtain all required permits from both municipal agencies and the utility company. The building permit ensures the installation meets code and does not impact surrounding structures. The utility permit, known as an interconnection permit, grants permission to connect your system to the grid and confirms the system is safe and code-compliant. Our solar towers are designed to meet all current local, state, and national regulations.
               </p>
-              <div style={{ background: C.g100, borderRadius: 8, padding: 14, border: `1px solid ${C.g200}`, marginBottom: 20 }}>
+              <div style={{ background: C.g100, borderRadius: 8, padding: 14, border: `1px solid ${C.g200}`, marginBottom: 20, breakInside: "avoid", pageBreakInside: "avoid" }}>
                 <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans, marginBottom: 4 }}>Site Overview</div>
                 <p style={{ color: C.g700, fontSize: 12, lineHeight: 1.6, fontFamily: fontSans, margin: 0 }}>
                   To complete the design and validate final output potential, we recommend a follow-up site inspection to assess soil conditions (for ground-mounted units), accessibility, electrical interconnection points, and regional weather patterns.
                 </p>
               </div>
 
-              <h3 style={{ fontSize: 22, fontWeight: 400, color: C.navy, margin: "0 0 10px 0" }}>Customer Approval:</h3>
+              <h3 style={{ fontSize: 22, fontWeight: 400, color: titleColor, margin: "0 0 10px 0" }}>Customer Approval:</h3>
               <p style={{ color: C.g700, fontSize: 12, fontFamily: fontSans, marginBottom: 20 }}>
                 Once you've reviewed the terms above, sign this proposal to indicate your approval. An installation contract will then be created and sent to you for final approval and signature.
               </p>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32 }}>
-                <div>
-                  <div style={{ color: C.navy, fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Signature:</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32, breakInside: "avoid", pageBreakInside: "avoid" }}>
+                <div style={{ breakInside: "avoid", pageBreakInside: "avoid" }}>
+                  <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Signature:</div>
                   <div style={{ borderBottom: `1px solid ${C.g300}`, height: 36, marginBottom: 6, display: "flex", alignItems: "flex-end" }}>
                     <img
-                      src="/assets/adam-boudissa-signature.png"
+                      src="/assets/adam-boudissa-signature-new.png"
                       alt="Adam Boudissa signature"
                       style={{
                         maxHeight: 30,
@@ -2242,16 +3089,19 @@ export default function JantaProposal() {
                         objectFit: "contain",
                         imageRendering: "auto",
                         WebkitFontSmoothing: "antialiased",
+                        filter: proposalScreenDark ? "none" : "invert(1)",
+                        mixBlendMode: "normal",
+                        background: "transparent",
                       }}
                     />
                   </div>
                   <div style={{ fontSize: 12, fontFamily: fontSans, color: C.g700 }}>Janta Power</div>
                   <div style={{ fontSize: 12, fontFamily: fontSans, color: C.g700 }}>Adam Boudissa, Finance Officer</div>
                 </div>
-                <div>
-                  <div style={{ color: C.navy, fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Signature:</div>
+                <div style={{ breakInside: "avoid", pageBreakInside: "avoid" }}>
+                  <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Signature:</div>
                   <div style={{ borderBottom: `1px solid ${C.g300}`, height: 36, marginBottom: 6 }} />
-                  <div style={{ color: C.navy, fontSize: 12, fontWeight: 700 }}>Printed Name:</div>
+                  <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: 12, fontWeight: 700 }}>Printed Name:</div>
                   <div style={{ borderBottom: `1px solid ${C.g300}`, height: 20 }} />
                 </div>
               </div>
@@ -2281,7 +3131,7 @@ export default function JantaProposal() {
               >
                 {pdfExporting ? "Preparing PDF…" : "Download proposal as PDF"}
               </button>
-              <button onClick={() => setStep(0)} style={{ padding: "12px 0", background: C.white, color: C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Start New Proposal</button>
+              <button onClick={() => setStep(0)} style={{ padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Start New Proposal</button>
             </div>
           </div>
         )}
