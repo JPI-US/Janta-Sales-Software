@@ -6,10 +6,26 @@ const DB_KEY = "janta_local_db_v1";
 const SESSION_KEY = "janta_local_session_v1";
 const REMEMBER_KEY = "janta_local_saved_login_v1";
 const THEME_KEY = "janta_dark_mode_v1";
-// Admin-managed user list (local MVP): add/edit allowed users here.
+
+/** Lowercase emails that always have Settings → user management (local app). Add more admins here only. */
+const ADMIN_EMAIL_ALLOWLIST = new Set(["seansimmons@jantaus.com"]);
+
+/** Admin-managed user list (bootstrap): seeded on first run / merge. */
 const ADMIN_SEED_USERS = [
-  { name: "Sean Simmons", email: "seansimmons@jantaus.com", password: "CyanRyan05" },
+  {
+    name: "Sean Simmons",
+    email: "seansimmons@jantaus.com",
+    password: "CyanRyan05",
+    isAdmin: true,
+  },
 ];
+
+function userIsAdmin(u) {
+  if (!u || !u.email) return false;
+  const email = String(u.email).trim().toLowerCase();
+  if (ADMIN_EMAIL_ALLOWLIST.has(email)) return true;
+  return Boolean(u.isAdmin === true || u.role === "admin");
+}
 
 function readDb() {
   try {
@@ -42,24 +58,27 @@ function writeSession(userId) {
 function ensureSeedUsers(db) {
   if (!ADMIN_SEED_USERS.length) return db;
   const byEmail = new Map(
-    db.users.map((u) => [String(u.email || "").toLowerCase(), u])
+    db.users.map((u) => [String(u.email || "").toLowerCase(), { ...u }])
   );
   let changed = false;
   ADMIN_SEED_USERS.forEach((seed) => {
     const email = String(seed.email || "").trim().toLowerCase();
     if (!email || !seed.password) return;
+    const seedAdmin = Boolean(seed.isAdmin) || ADMIN_EMAIL_ALLOWLIST.has(email);
     const existing = byEmail.get(email);
     if (existing) {
       const next = {
         ...existing,
         name: seed.name || existing.name || email,
         password: seed.password,
+        isAdmin: seedAdmin || userIsAdmin(existing),
       };
       byEmail.set(email, next);
       changed =
         changed ||
         existing.password !== next.password ||
-        existing.name !== next.name;
+        existing.name !== next.name ||
+        Boolean(existing.isAdmin) !== Boolean(next.isAdmin);
       return;
     }
     changed = true;
@@ -68,12 +87,26 @@ function ensureSeedUsers(db) {
       name: seed.name || email,
       email,
       password: seed.password,
+      isAdmin: seedAdmin,
       createdAt: new Date().toISOString(),
       lastLoginAt: null,
     });
   });
-  if (!changed) return db;
-  return { ...db, users: Array.from(byEmail.values()) };
+  const users = Array.from(byEmail.values()).map((u) => {
+    const email = String(u.email || "").toLowerCase();
+    const mustAdmin = ADMIN_EMAIL_ALLOWLIST.has(email);
+    if (mustAdmin && !u.isAdmin) {
+      changed = true;
+      return { ...u, isAdmin: true };
+    }
+    return u;
+  });
+  return { ...db, users };
+}
+
+function isSettingsSuccessMessage(msg) {
+  if (!msg || typeof msg !== "string") return false;
+  return /^(Email updated|Password updated|User added|User removed)/i.test(msg.trim());
 }
 
 function AuthGate() {
@@ -82,7 +115,7 @@ function AuthGate() {
     writeDb(seeded);
     return seeded;
   });
-  const [sessionUserId, setSessionUserId] = useState(() => readSession());
+  const [sessionUserId, setSessionUserId] = useState("");
   const savedLogin = useMemo(() => {
     try {
       const raw = localStorage.getItem(REMEMBER_KEY);
@@ -109,6 +142,10 @@ function AuthGate() {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [settingsMsg, setSettingsMsg] = useState("");
+  const [addUserName, setAddUserName] = useState("");
+  const [addUserEmail, setAddUserEmail] = useState("");
+  const [addUserPassword, setAddUserPassword] = useState("");
+  const [addUserConfirm, setAddUserConfirm] = useState("");
   const [appDarkMode, setAppDarkMode] = useState(() => {
     try {
       return localStorage.getItem(THEME_KEY) === "1";
@@ -121,6 +158,10 @@ function AuthGate() {
     () => db.users.find((u) => u.id === sessionUserId) || null,
     [db.users, sessionUserId]
   );
+  const currentUserIsAdmin = userIsAdmin(currentUser);
+  React.useEffect(() => {
+    writeSession("");
+  }, []);
 
   function resetForm() {
     setEmail("");
@@ -142,8 +183,9 @@ function AuthGate() {
         u.id === user.id ? { ...u, lastLoginAt: new Date().toISOString() } : u
       ),
     };
-    setDb(nextDb);
-    writeDb(nextDb);
+    const merged = ensureSeedUsers(nextDb);
+    setDb(merged);
+    writeDb(merged);
     setSessionUserId(user.id);
     writeSession(user.id);
     if (rememberLogin) {
@@ -172,10 +214,75 @@ function AuthGate() {
     setCurrentPassword("");
     setNewPassword("");
     setConfirmPassword("");
+    setAddUserName("");
+    setAddUserEmail("");
+    setAddUserPassword("");
+    setAddUserConfirm("");
     setSettingsMsg("");
     setSettingsOpen(true);
   }
 
+  /** Only removable if not you and not a built-in admin account. */
+  function canRemoveUser(target) {
+    if (!target || !currentUser) return false;
+    if (target.id === currentUser.id) return false;
+    if (ADMIN_EMAIL_ALLOWLIST.has(String(target.email || "").toLowerCase())) return false;
+    return currentUserIsAdmin;
+  }
+
+  function addInviteUser() {
+    if (!currentUser || !currentUserIsAdmin) return;
+    const name = addUserName.trim() || addUserEmail.trim().split("@")[0] || "User";
+    const cleanEmail = addUserEmail.trim().toLowerCase();
+    if (!cleanEmail.includes("@")) {
+      setSettingsMsg("Enter a valid email address for the new user.");
+      return;
+    }
+    if (!addUserPassword || addUserPassword.length < 6) {
+      setSettingsMsg("Password must be at least 6 characters.");
+      return;
+    }
+    if (addUserPassword !== addUserConfirm) {
+      setSettingsMsg("Password and confirm password must match.");
+      return;
+    }
+    if (db.users.some((u) => String(u.email).toLowerCase() === cleanEmail)) {
+      setSettingsMsg("That email is already registered.");
+      return;
+    }
+    const newUser = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      name,
+      email: cleanEmail,
+      password: addUserPassword,
+      isAdmin: false,
+      createdBy: currentUser.id,
+      createdAt: new Date().toISOString(),
+      lastLoginAt: null,
+    };
+    if (ADMIN_EMAIL_ALLOWLIST.has(cleanEmail)) {
+      newUser.isAdmin = true;
+    }
+    const nextDb = ensureSeedUsers({ ...db, users: [...db.users, newUser] });
+    setDb(nextDb);
+    writeDb(nextDb);
+    setSettingsMsg("User added.");
+    setAddUserName("");
+    setAddUserEmail("");
+    setAddUserPassword("");
+    setAddUserConfirm("");
+  }
+
+  function removeInviteUser(target) {
+    if (!canRemoveUser(target)) return;
+    const nextDb = ensureSeedUsers({
+      ...db,
+      users: db.users.filter((u) => u.id !== target.id),
+    });
+    setDb(nextDb);
+    writeDb(nextDb);
+    setSettingsMsg("User removed.");
+  }
   function saveEmail() {
     if (!currentUser) return;
     const currentEmailInput = settingsCurrentEmail.trim().toLowerCase();
@@ -218,8 +325,9 @@ function AuthGate() {
           : u
       ),
     };
-    setDb(nextDb);
-    writeDb(nextDb);
+    const merged = ensureSeedUsers(nextDb);
+    setDb(merged);
+    writeDb(merged);
     setSettingsMsg("Email updated.");
     setSettingsCurrentEmail(cleanEmail);
     setSettingsNewEmail("");
@@ -253,8 +361,9 @@ function AuthGate() {
         u.id === currentUser.id ? { ...u, password: newPassword } : u
       ),
     };
-    setDb(nextDb);
-    writeDb(nextDb);
+    const merged = ensureSeedUsers(nextDb);
+    setDb(merged);
+    writeDb(merged);
     setSettingsMsg("Password updated.");
     setCurrentPassword("");
     setNewPassword("");
@@ -343,10 +452,120 @@ function AuthGate() {
                 Update password
               </button>
             </div>
+
+            {currentUserIsAdmin && (
+              <div style={{ marginBottom: 12, padding: 12, border: `1px solid ${panelBorder}`, borderRadius: 8 }}>
+                <div style={{ fontSize: 12, color: subtleText, marginBottom: 4 }}>User management</div>
+                <p style={{ margin: "0 0 12px 0", fontSize: 11, color: subtleText, lineHeight: 1.45 }}>
+                  Add sign-in accounts for teammates. Stored locally in this browser only (same as proposals).
+                </p>
+                <input
+                  value={addUserName}
+                  onChange={(e) => setAddUserName(e.target.value)}
+                  placeholder="Display name (optional)"
+                  style={themedInputStyle(appDarkMode)}
+                />
+                <input
+                  value={addUserEmail}
+                  onChange={(e) => setAddUserEmail(e.target.value)}
+                  placeholder="Email"
+                  type="email"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  style={themedInputStyle(appDarkMode)}
+                />
+                <input
+                  type="password"
+                  value={addUserPassword}
+                  onChange={(e) => setAddUserPassword(e.target.value)}
+                  placeholder="Initial password"
+                  style={themedInputStyle(appDarkMode)}
+                />
+                <input
+                  type="password"
+                  value={addUserConfirm}
+                  onChange={(e) => setAddUserConfirm(e.target.value)}
+                  placeholder="Confirm initial password"
+                  style={themedInputStyle(appDarkMode)}
+                />
+                <button type="button" onClick={addInviteUser} style={themedPrimaryButtonStyle(appDarkMode)}>
+                  Add user
+                </button>
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${panelBorder}` }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: headingColor, marginBottom: 10 }}>
+                    Accounts ({db.users.length})
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[...db.users]
+                      .sort((a, b) => String(a.email).localeCompare(String(b.email)))
+                      .map((u) => (
+                        <div
+                          key={u.id}
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            alignItems: "center",
+                            gap: 8,
+                            justifyContent: "space-between",
+                            padding: "8px 10px",
+                            borderRadius: 8,
+                            background: appDarkMode ? "#120E0A" : "#F9FAFB",
+                            border: `1px solid ${panelBorder}`,
+                          }}
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: headingColor }}>{u.name || u.email}</div>
+                            <div style={{ fontSize: 12, color: subtleText }}>{u.email}</div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            {userIsAdmin(u) && (
+                              <span
+                                style={{
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  textTransform: "uppercase",
+                                  letterSpacing: "0.04em",
+                                  color: appDarkMode ? "#D4A15A" : "#2F3B4C",
+                                  padding: "2px 8px",
+                                  borderRadius: 999,
+                                  border: `1px solid ${panelBorder}`,
+                                }}
+                              >
+                                Admin
+                              </span>
+                            )}
+                            {u.id === currentUser.id ? (
+                              <span style={{ fontSize: 11, color: subtleText }}>You</span>
+                            ) : canRemoveUser(u) ? (
+                              <button
+                                type="button"
+                                onClick={() => removeInviteUser(u)}
+                                style={{
+                                  padding: "6px 12px",
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  cursor: "pointer",
+                                  borderRadius: 8,
+                                  border: appDarkMode ? "1px solid #5B2921" : "1px solid #F1B8B8",
+                                  background: appDarkMode ? "#2D1612" : "#FFF5F5",
+                                  color: appDarkMode ? "#F9C8C1" : "#B42318",
+                                }}
+                              >
+                                Remove
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {settingsMsg && (
               <div
                 style={{
-                  color: settingsMsg.includes("saved") ? "#2A9D8F" : "#F55A5A",
+                  color: isSettingsSuccessMessage(settingsMsg) ? "#2A9D8F" : "#F55A5A",
                   fontSize: 12,
                   marginBottom: 10,
                 }}
@@ -387,6 +606,7 @@ function AuthGate() {
       <div style={{ minHeight: "100vh", background: appDarkMode ? "#000000" : "#F3F4F6" }}>
         <JantaProposal
           onOpenSettings={openSettings}
+          onSignOut={handleSignOut}
           initialDarkMode={appDarkMode}
           onDarkModeChange={(nextDark) => {
             setAppDarkMode(Boolean(nextDark));
