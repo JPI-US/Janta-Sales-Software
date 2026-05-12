@@ -2147,20 +2147,6 @@ export default function JantaProposal({ onOpenSettings, onSignOut, initialDarkMo
         {/* ═══ STEP 0: BILL ANALYSIS ═══ */}
         {step === 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div style={{ background: C.white, borderRadius: 10, padding: 14, border: `1px solid ${C.g200}` }}>
-              <Toggle
-                label="Production-only proposal (no bill or monthly usage; no utility rate)"
-                checked={productionOnlyMode}
-                onChange={onProductionOnlyToggle}
-              />
-              <Toggle
-                label="Production vs. energy use comparison (keep monthly usage for charts; no utility rate or escalation)"
-                checked={usageComparisonMode}
-                onChange={onUsageComparisonToggle}
-              />
-            </div>
-
-            {!productionOnlyMode && (
             <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                 <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
@@ -2169,6 +2155,8 @@ export default function JantaProposal({ onOpenSettings, onSignOut, initialDarkMo
               <p style={{ color: C.g500, fontSize: 12, fontFamily: fontSans, margin: "0 0 10px 0" }}>
                 Drag and drop one or more bill PDF/TXT files (merge mode), or paste text manually. The system will extract customer name, address, account number, usage history, and rate information automatically.
               </p>
+              {!productionOnlyMode && (
+              <>
               <input
                 ref={billInputRef}
                 type="file"
@@ -2238,8 +2226,21 @@ export default function JantaProposal({ onOpenSettings, onSignOut, initialDarkMo
               }}>
                 Extract Bill Data
               </button>
+              </>
+              )}
+              <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.g200}` }}>
+                <Toggle
+                  label="Production-only proposal (no bill or monthly usage; no utility rate)"
+                  checked={productionOnlyMode}
+                  onChange={onProductionOnlyToggle}
+                />
+                <Toggle
+                  label="Production vs. energy use comparison (keep monthly usage for charts; no utility rate or escalation)"
+                  checked={usageComparisonMode}
+                  onChange={onUsageComparisonToggle}
+                />
+              </div>
             </div>
-            )}
 
             {/* Extracted / Manual Entry */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
@@ -3068,11 +3069,6 @@ export default function JantaProposal({ onOpenSettings, onSignOut, initialDarkMo
         {/* ═══ STEP 3: PROJECT FINANCIALS ═══ */}
         {step === 3 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div style={{ background: C.white, borderRadius: 10, padding: 14, border: `1px solid ${C.g200}` }}>
-              <Toggle label="Include Project Financials section on proposal" checked={includeFinancialsInProposal} onChange={setIncludeFinancialsInProposal} />
-              <Toggle label="Include 'Capital Invest Less Value of Saved Land' block" checked={includeCapitalLessSavedLand} onChange={setIncludeCapitalLessSavedLand} />
-            </div>
-
             <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
                 <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
@@ -3112,6 +3108,10 @@ export default function JantaProposal({ onOpenSettings, onSignOut, initialDarkMo
                   </button>
                 </div>
               )}
+              <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.g200}` }}>
+                <Toggle label="Include Project Financials section on proposal" checked={includeFinancialsInProposal} onChange={setIncludeFinancialsInProposal} />
+                <Toggle label="Include 'Capital Invest Less Value of Saved Land' block" checked={includeCapitalLessSavedLand} onChange={setIncludeCapitalLessSavedLand} />
+              </div>
             </div>
 
             {includeFinancialsInProposal && (
@@ -3248,7 +3248,11 @@ export default function JantaProposal({ onOpenSettings, onSignOut, initialDarkMo
               const seasonalChartH = compactFirstPageBundle ? 132 : 155;
               return (
                 <>
-            <div style={{ background: C.white, borderRadius: 10, padding: 12, border: `1px solid ${C.g200}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
+                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>PDF layout</h3>
+              </div>
               <div>
                 <Toggle label="Show PDF page breaks" checked={showProposalPageBreaks} onChange={setShowProposalPageBreaks} />
                 <Toggle
