@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
-import JantaProposal from "../janta-proposal-generator-v3 (1).jsx";
+import ProposalApp from "./ProposalApp.jsx";
 
 const DB_KEY = "janta_local_db_v1";
 const SESSION_KEY = "janta_local_session_v1";
@@ -14,11 +14,89 @@ const ADMIN_EMAIL_ALLOWLIST = new Set(["seansimmons@jantaus.com"]);
 const ADMIN_SEED_USERS = [
   {
     name: "Sean Simmons",
+    username: "sean",
     email: "seansimmons@jantaus.com",
     password: "CyanRyan05",
     isAdmin: true,
   },
 ];
+
+function normalizeLoginId(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function defaultUsernameFromEmail(email) {
+  const local = String(email || "").split("@")[0].trim().toLowerCase();
+  return local || "";
+}
+
+function slugifyUsername(name) {
+  const slug = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .slice(0, 32);
+  return slug;
+}
+
+function uniqueUsernameFromDisplayName(name, email, users, excludeUserId = "") {
+  const taken = new Set(
+    users
+      .filter((u) => u.id !== excludeUserId)
+      .map((u) => String(u.username || "").toLowerCase())
+      .filter(Boolean)
+  );
+  let base = slugifyUsername(name) || defaultUsernameFromEmail(email);
+  if (!base) base = "user";
+  let candidate = base;
+  let n = 2;
+  while (taken.has(candidate)) {
+    candidate = `${base}${n}`;
+    n += 1;
+  }
+  return candidate;
+}
+
+function isProtectedAdminAccount(user) {
+  return ADMIN_EMAIL_ALLOWLIST.has(String(user?.email || "").toLowerCase());
+}
+
+function normalizeUserRecord(user) {
+  const email = String(user.email || "").trim().toLowerCase();
+  return {
+    ...user,
+    email,
+    username: String(user.username || defaultUsernameFromEmail(email)).trim().toLowerCase(),
+  };
+}
+
+function userMatchesLogin(user, loginId, pass) {
+  if (!user || user.password !== pass) return false;
+  const id = normalizeLoginId(loginId);
+  if (!id) return false;
+  const email = String(user.email || "").toLowerCase();
+  const username = String(user.username || "").toLowerCase();
+  return email === id || (username && username === id);
+}
+
+function updateRememberedCredentials(patch) {
+  try {
+    const raw = localStorage.getItem(REMEMBER_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.remember) return;
+    localStorage.setItem(
+      REMEMBER_KEY,
+      JSON.stringify({
+        email: patch.email != null ? patch.email : String(parsed.email || ""),
+        password: patch.password != null ? patch.password : String(parsed.password || ""),
+        remember: true,
+      })
+    );
+  } catch (_err) {
+    // ignore
+  }
+}
 
 function userIsAdmin(u) {
   if (!u || !u.email) return false;
@@ -33,7 +111,7 @@ function readDb() {
     if (!raw) return { users: [] };
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed.users)) return { users: [] };
-    return parsed;
+    return { users: parsed.users.map(normalizeUserRecord) };
   } catch (_err) {
     return { users: [] };
   }
@@ -67,46 +145,51 @@ function ensureSeedUsers(db) {
     const seedAdmin = Boolean(seed.isAdmin) || ADMIN_EMAIL_ALLOWLIST.has(email);
     const existing = byEmail.get(email);
     if (existing) {
-      const next = {
+      const next = normalizeUserRecord({
         ...existing,
         name: seed.name || existing.name || email,
-        password: seed.password,
+        username: existing.username || seed.username || defaultUsernameFromEmail(email),
+        // Keep password the user chose; seed password only applies when creating the account.
+        password: existing.password || seed.password,
         isAdmin: seedAdmin || userIsAdmin(existing),
-      };
+      });
       byEmail.set(email, next);
       changed =
         changed ||
         existing.password !== next.password ||
         existing.name !== next.name ||
+        existing.username !== next.username ||
         Boolean(existing.isAdmin) !== Boolean(next.isAdmin);
       return;
     }
     changed = true;
-    byEmail.set(email, {
+    byEmail.set(email, normalizeUserRecord({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name: seed.name || email,
+      username: seed.username || defaultUsernameFromEmail(email),
       email,
       password: seed.password,
       isAdmin: seedAdmin,
       createdAt: new Date().toISOString(),
       lastLoginAt: null,
-    });
+    }));
   });
   const users = Array.from(byEmail.values()).map((u) => {
-    const email = String(u.email || "").toLowerCase();
+    const normalized = normalizeUserRecord(u);
+    const email = String(normalized.email || "").toLowerCase();
     const mustAdmin = ADMIN_EMAIL_ALLOWLIST.has(email);
-    if (mustAdmin && !u.isAdmin) {
+    if (mustAdmin && !normalized.isAdmin) {
       changed = true;
-      return { ...u, isAdmin: true };
+      return { ...normalized, isAdmin: true };
     }
-    return u;
+    return normalized;
   });
   return { ...db, users };
 }
 
 function isSettingsSuccessMessage(msg) {
   if (!msg || typeof msg !== "string") return false;
-  return /^(Email updated|Password updated|User added|User removed)/i.test(msg.trim());
+  return /^(Email updated|Password updated|User added|User removed|Role updated)/i.test(msg.trim());
 }
 
 function AuthGate() {
@@ -130,7 +213,7 @@ function AuthGate() {
       return { email: "", password: "", remember: false };
     }
   }, []);
-  const [email, setEmail] = useState(savedLogin.email);
+  const [loginId, setLoginId] = useState(savedLogin.email);
   const [password, setPassword] = useState(savedLogin.password);
   const [rememberLogin, setRememberLogin] = useState(savedLogin.remember);
   const [showPassword, setShowPassword] = useState(false);
@@ -164,17 +247,15 @@ function AuthGate() {
   }, []);
 
   function resetForm() {
-    setEmail("");
+    setLoginId("");
     setPassword("");
   }
 
   function handleSignIn() {
-    const cleanEmail = email.trim().toLowerCase();
-    const user = db.users.find(
-      (u) => u.email === cleanEmail && u.password === password
-    );
+    const id = normalizeLoginId(loginId);
+    const user = db.users.find((u) => userMatchesLogin(u, id, password));
     if (!user) {
-      setError("Invalid email or password.");
+      setError("Invalid username/email or password.");
       return;
     }
     const nextDb = {
@@ -191,7 +272,7 @@ function AuthGate() {
     if (rememberLogin) {
       localStorage.setItem(
         REMEMBER_KEY,
-        JSON.stringify({ email: cleanEmail, password, remember: true })
+        JSON.stringify({ email: user.email, password, remember: true })
       );
     } else {
       localStorage.removeItem(REMEMBER_KEY);
@@ -201,10 +282,18 @@ function AuthGate() {
   }
 
   function handleSignOut() {
+    const uid = sessionUserId;
     setSessionUserId("");
     writeSession("");
     setSettingsOpen(false);
     setSettingsMsg("");
+    if (uid) {
+      try {
+        sessionStorage.removeItem(`janta_app_nav_v1_${uid}`);
+      } catch (_err) {
+        // ignore
+      }
+    }
   }
 
   function openSettings() {
@@ -230,12 +319,43 @@ function AuthGate() {
     return currentUserIsAdmin;
   }
 
+  function canChangeUserRole(target) {
+    if (!currentUserIsAdmin || !target || !currentUser) return false;
+    if (target.id === currentUser.id) return false;
+    if (isProtectedAdminAccount(target)) return false;
+    return true;
+  }
+
+  function setUserRole(target, nextIsAdmin) {
+    if (!canChangeUserRole(target)) return;
+    const wantAdmin = Boolean(nextIsAdmin);
+    const nextDb = ensureSeedUsers({
+      ...db,
+      users: db.users.map((u) =>
+        u.id === target.id
+          ? { ...u, isAdmin: wantAdmin, role: wantAdmin ? "admin" : "member" }
+          : u
+      ),
+    });
+    setDb(nextDb);
+    writeDb(nextDb);
+    setSettingsMsg(`Role updated: ${target.name || target.username} is now ${wantAdmin ? "Admin" : "Member"}.`);
+  }
+
   function addInviteUser() {
     if (!currentUser || !currentUserIsAdmin) return;
-    const name = addUserName.trim() || addUserEmail.trim().split("@")[0] || "User";
+    const name = addUserName.trim();
     const cleanEmail = addUserEmail.trim().toLowerCase();
+    if (!name) {
+      setSettingsMsg("Display name is required — it becomes their sign-in username.");
+      return;
+    }
     if (!cleanEmail.includes("@")) {
       setSettingsMsg("Enter a valid email address for the new user.");
+      return;
+    }
+    if (!slugifyUsername(name)) {
+      setSettingsMsg("Display name must include at least one letter or number for the username.");
       return;
     }
     if (!addUserPassword || addUserPassword.length < 6) {
@@ -250,16 +370,19 @@ function AuthGate() {
       setSettingsMsg("That email is already registered.");
       return;
     }
-    const newUser = {
+    const username = uniqueUsernameFromDisplayName(name, cleanEmail, db.users);
+    const newUser = normalizeUserRecord({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       name,
+      username,
       email: cleanEmail,
       password: addUserPassword,
       isAdmin: false,
+      role: "member",
       createdBy: currentUser.id,
       createdAt: new Date().toISOString(),
       lastLoginAt: null,
-    };
+    });
     if (ADMIN_EMAIL_ALLOWLIST.has(cleanEmail)) {
       newUser.isAdmin = true;
     }
@@ -331,6 +454,7 @@ function AuthGate() {
     setSettingsMsg("Email updated.");
     setSettingsCurrentEmail(cleanEmail);
     setSettingsNewEmail("");
+    updateRememberedCredentials({ email: cleanEmail });
   }
 
   function savePassword() {
@@ -368,23 +492,45 @@ function AuthGate() {
     setCurrentPassword("");
     setNewPassword("");
     setConfirmPassword("");
+    updateRememberedCredentials({ password: newPassword });
   }
 
   if (currentUser) {
-    if (settingsOpen) {
-      const settingsBg = appDarkMode ? "#100D0A" : "#F3F4F6";
-      const panelBg = appDarkMode ? "#1A1510" : "#FFFFFF";
-      const panelBorder = appDarkMode ? "#3A2B1D" : "#DDE2E8";
-      const headingColor = appDarkMode ? "#F8F2E8" : "#2F3B4C";
-      const subtleText = appDarkMode ? "#D8C6AE" : "#6F8096";
-      return (
+    const settingsBg = appDarkMode ? "#100D0A" : "#F3F4F6";
+    const panelBg = appDarkMode ? "#1A1510" : "#FFFFFF";
+    const panelBorder = appDarkMode ? "#3A2B1D" : "#DDE2E8";
+    const headingColor = appDarkMode ? "#F8F2E8" : "#2F3B4C";
+    const subtleText = appDarkMode ? "#D8C6AE" : "#6F8096";
+
+    return (
+      <div style={{ minHeight: "100vh", background: appDarkMode ? "#000000" : "#F3F4F6", position: "relative" }}>
+        <ProposalApp
+          currentUser={currentUser}
+          onOpenSettings={openSettings}
+          onSignOut={handleSignOut}
+          initialDarkMode={appDarkMode}
+          onDarkModeChange={(nextDark) => {
+            setAppDarkMode(Boolean(nextDark));
+            try {
+              localStorage.setItem(THEME_KEY, nextDark ? "1" : "0");
+            } catch (_err) {
+              // ignore storage write issues
+            }
+          }}
+        />
+
+        {settingsOpen && (
         <div
           style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 2000,
             minHeight: "100vh",
             display: "grid",
             placeItems: "center",
             background: settingsBg,
             padding: 20,
+            overflow: "auto",
           }}
         >
           <div
@@ -457,14 +603,124 @@ function AuthGate() {
               <div style={{ marginBottom: 12, padding: 12, border: `1px solid ${panelBorder}`, borderRadius: 8 }}>
                 <div style={{ fontSize: 12, color: subtleText, marginBottom: 4 }}>User management</div>
                 <p style={{ margin: "0 0 12px 0", fontSize: 11, color: subtleText, lineHeight: 1.45 }}>
-                  Add sign-in accounts for teammates. Stored locally in this browser only (same as proposals).
+                  Manage team sign-in accounts on this device. Display name becomes their username for login.
                 </p>
+
+                <div style={{ marginBottom: 14, paddingBottom: 12, borderBottom: `1px solid ${panelBorder}` }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: headingColor, marginBottom: 10 }}>
+                    Team members ({db.users.length})
+                  </div>
+                  {db.users.length === 0 ? (
+                    <div style={{ fontSize: 12, color: subtleText }}>No accounts yet.</div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {[...db.users]
+                        .sort((a, b) => {
+                          const aYou = a.id === currentUser.id ? 0 : 1;
+                          const bYou = b.id === currentUser.id ? 0 : 1;
+                          if (aYou !== bYou) return aYou - bYou;
+                          return String(a.name || a.username).localeCompare(String(b.name || b.username));
+                        })
+                        .map((u) => {
+                          const isYou = u.id === currentUser.id;
+                          const admin = userIsAdmin(u);
+                          return (
+                            <div
+                              key={u.id}
+                              style={{
+                                display: "flex",
+                                flexWrap: "wrap",
+                                alignItems: "center",
+                                gap: 8,
+                                justifyContent: "space-between",
+                                padding: "10px 12px",
+                                borderRadius: 8,
+                                background: appDarkMode ? "#120E0A" : "#F9FAFB",
+                                border: `1px solid ${isYou ? (appDarkMode ? "#5C4A2E" : "#C8A85A") : panelBorder}`,
+                              }}
+                            >
+                              <div style={{ minWidth: 0, flex: "1 1 180px" }}>
+                                <div style={{ fontSize: 13, fontWeight: 600, color: headingColor }}>
+                                  @{u.username || "—"}
+                                  {isYou ? " (you)" : ""}
+                                </div>
+                                <div style={{ fontSize: 12, color: subtleText }}>{u.name || u.email}</div>
+                                <div style={{ fontSize: 11, color: subtleText, marginTop: 2 }}>{u.email}</div>
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                {canChangeUserRole(u) ? (
+                                  <select
+                                    value={admin ? "admin" : "member"}
+                                    onChange={(e) => setUserRole(u, e.target.value === "admin")}
+                                    style={{
+                                      padding: "6px 10px",
+                                      borderRadius: 8,
+                                      border: `1px solid ${panelBorder}`,
+                                      background: appDarkMode ? "#1A1510" : "#fff",
+                                      color: headingColor,
+                                      fontSize: 12,
+                                      fontFamily: "Inter, system-ui, sans-serif",
+                                      cursor: "pointer",
+                                    }}
+                                  >
+                                    <option value="member">Member</option>
+                                    <option value="admin">Admin</option>
+                                  </select>
+                                ) : (
+                                  <span
+                                    style={{
+                                      fontSize: 10,
+                                      fontWeight: 700,
+                                      textTransform: "uppercase",
+                                      letterSpacing: "0.04em",
+                                      color: appDarkMode ? "#D4A15A" : "#2F3B4C",
+                                      padding: "2px 8px",
+                                      borderRadius: 999,
+                                      border: `1px solid ${panelBorder}`,
+                                    }}
+                                  >
+                                    {admin ? "Admin" : "Member"}
+                                    {isProtectedAdminAccount(u) ? " · Protected" : ""}
+                                  </span>
+                                )}
+                                {!isYou && canRemoveUser(u) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => removeInviteUser(u)}
+                                    style={{
+                                      padding: "6px 12px",
+                                      fontSize: 12,
+                                      fontWeight: 600,
+                                      cursor: "pointer",
+                                      borderRadius: 8,
+                                      border: appDarkMode ? "1px solid #5B2921" : "1px solid #F1B8B8",
+                                      background: appDarkMode ? "#2D1612" : "#FFF5F5",
+                                      color: appDarkMode ? "#F9C8C1" : "#B42318",
+                                    }}
+                                  >
+                                    Remove
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ fontSize: 11, fontWeight: 600, color: headingColor, marginBottom: 8 }}>Add member</div>
                 <input
                   value={addUserName}
                   onChange={(e) => setAddUserName(e.target.value)}
-                  placeholder="Display name (optional)"
+                  placeholder="Display name (becomes username, e.g. Kerry Turk → kerryturk)"
                   style={themedInputStyle(appDarkMode)}
                 />
+                {addUserName.trim() && (
+                  <div style={{ fontSize: 11, color: subtleText, margin: "-4px 0 8px 0" }}>
+                    Sign-in username: <strong style={{ color: headingColor }}>@{uniqueUsernameFromDisplayName(addUserName, addUserEmail, db.users)}</strong>
+                  </div>
+                )}
                 <input
                   value={addUserEmail}
                   onChange={(e) => setAddUserEmail(e.target.value)}
@@ -489,76 +745,8 @@ function AuthGate() {
                   style={themedInputStyle(appDarkMode)}
                 />
                 <button type="button" onClick={addInviteUser} style={themedPrimaryButtonStyle(appDarkMode)}>
-                  Add user
+                  Add member
                 </button>
-                <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${panelBorder}` }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: headingColor, marginBottom: 10 }}>
-                    Accounts ({db.users.length})
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {[...db.users]
-                      .sort((a, b) => String(a.email).localeCompare(String(b.email)))
-                      .map((u) => (
-                        <div
-                          key={u.id}
-                          style={{
-                            display: "flex",
-                            flexWrap: "wrap",
-                            alignItems: "center",
-                            gap: 8,
-                            justifyContent: "space-between",
-                            padding: "8px 10px",
-                            borderRadius: 8,
-                            background: appDarkMode ? "#120E0A" : "#F9FAFB",
-                            border: `1px solid ${panelBorder}`,
-                          }}
-                        >
-                          <div style={{ minWidth: 0 }}>
-                            <div style={{ fontSize: 13, fontWeight: 600, color: headingColor }}>{u.name || u.email}</div>
-                            <div style={{ fontSize: 12, color: subtleText }}>{u.email}</div>
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            {userIsAdmin(u) && (
-                              <span
-                                style={{
-                                  fontSize: 10,
-                                  fontWeight: 700,
-                                  textTransform: "uppercase",
-                                  letterSpacing: "0.04em",
-                                  color: appDarkMode ? "#D4A15A" : "#2F3B4C",
-                                  padding: "2px 8px",
-                                  borderRadius: 999,
-                                  border: `1px solid ${panelBorder}`,
-                                }}
-                              >
-                                Admin
-                              </span>
-                            )}
-                            {u.id === currentUser.id ? (
-                              <span style={{ fontSize: 11, color: subtleText }}>You</span>
-                            ) : canRemoveUser(u) ? (
-                              <button
-                                type="button"
-                                onClick={() => removeInviteUser(u)}
-                                style={{
-                                  padding: "6px 12px",
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                  borderRadius: 8,
-                                  border: appDarkMode ? "1px solid #5B2921" : "1px solid #F1B8B8",
-                                  background: appDarkMode ? "#2D1612" : "#FFF5F5",
-                                  color: appDarkMode ? "#F9C8C1" : "#B42318",
-                                }}
-                              >
-                                Remove
-                              </button>
-                            ) : null}
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                </div>
               </div>
             )}
 
@@ -600,23 +788,7 @@ function AuthGate() {
             </button>
           </div>
         </div>
-      );
-    }
-    return (
-      <div style={{ minHeight: "100vh", background: appDarkMode ? "#000000" : "#F3F4F6" }}>
-        <JantaProposal
-          onOpenSettings={openSettings}
-          onSignOut={handleSignOut}
-          initialDarkMode={appDarkMode}
-          onDarkModeChange={(nextDark) => {
-            setAppDarkMode(Boolean(nextDark));
-            try {
-              localStorage.setItem(THEME_KEY, nextDark ? "1" : "0");
-            } catch (_err) {
-              // ignore storage write issues
-            }
-          }}
-        />
+        )}
       </div>
     );
   }
@@ -683,9 +855,11 @@ function AuthGate() {
           Access the Janta Proposal Generator.
         </p>
         <input
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="Email"
+          value={loginId}
+          onChange={(e) => setLoginId(e.target.value)}
+          placeholder="Email or username"
+          autoCapitalize="off"
+          autoCorrect="off"
           style={inputStyle}
         />
         <div style={{ position: "relative", marginBottom: 10 }}>
@@ -749,7 +923,7 @@ function AuthGate() {
             checked={rememberLogin}
             onChange={(e) => setRememberLogin(e.target.checked)}
           />
-          Save email and password
+          Save login and password
         </label>
 
         {error && (

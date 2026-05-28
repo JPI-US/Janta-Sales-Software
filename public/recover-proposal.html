@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Recover Janta proposal data</title>
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; max-width: 720px; margin: 32px auto; padding: 0 16px; color: #2f3b4c; }
+    h1 { font-size: 1.35rem; }
+    button, textarea { font: inherit; }
+    button { background: #2f3b4c; color: #fff; border: none; padding: 10px 16px; border-radius: 8px; cursor: pointer; margin: 6px 6px 6px 0; }
+    button.secondary { background: #6f8096; }
+    textarea { width: 100%; min-height: 120px; margin: 12px 0; padding: 10px; border: 1px solid #dde2e8; border-radius: 8px; }
+    .card { border: 1px solid #dde2e8; border-radius: 10px; padding: 14px; margin: 12px 0; }
+    .muted { color: #6f8096; font-size: 0.9rem; }
+    .ok { color: #0d7a4a; }
+    .warn { color: #b45309; }
+  </style>
+</head>
+<body>
+  <h1>Recover proposal data (this browser only)</h1>
+  <p class="muted">
+    Scans <code>localStorage</code> on this device for Janta drafts and saved proposals.
+    Open this page in the <strong>same browser tab/profile</strong> you use for localhost (Cursor Simple Browser counts).
+  </p>
+  <div id="session"></div>
+  <div id="drafts"></div>
+  <div class="card">
+    <h2 style="margin-top:0;font-size:1rem;">Import partial scaffold (May 27)</h2>
+    <p class="muted">Multi-meter on, one meter <strong>Meter 60-01</strong>. Monthly usage was not recoverable — re-enter or re-upload bills.</p>
+    <button type="button" id="importPartial">Save partial recovery to my account</button>
+    <p id="importStatus"></p>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0;font-size:1rem;">Paste snapshot JSON</h2>
+    <textarea id="paste" placeholder='{"v":1,"meters":[...]}'></textarea>
+    <button type="button" id="importPaste">Save pasted snapshot</button>
+  </div>
+  <script type="module">
+    const SESSION_KEY = "janta_local_session_v1";
+    const PROPOSALS_KEY = "janta_saved_proposals_v1";
+
+    function snapshotScore(s) {
+      if (!s || s.v !== 1) return 0;
+      let score = 0;
+      const filled = (arr) => (arr || []).filter((v) => v != null && Number(v) > 0).length;
+      if (String(s.custName || "").trim()) score += 15;
+      if (String(s.custAddress || "").trim()) score += 15;
+      if (String(s.billText || "").length > 40) score += 25;
+      score += filled(s.monthlyKWh) * 4;
+      for (const m of s.meters || []) {
+        score += filled(m.monthlyKWh) * 5 + (m.usageSavedAt ? 10 : 0);
+        if (m.meterNumber) score += 6;
+      }
+      return score;
+    }
+
+    function readSessionUserId() {
+      try {
+        const raw = localStorage.getItem(SESSION_KEY);
+        if (!raw) return null;
+        const id = JSON.parse(raw)?.userId;
+        return id || null;
+      } catch {
+        return null;
+      }
+    }
+
+    function listDrafts() {
+      const rows = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        if (key.startsWith("janta_session_draft_v1_")) {
+          try {
+            const parsed = JSON.parse(localStorage.getItem(key));
+            if (parsed?.snapshot) rows.push({ key, snapshot: parsed.snapshot, updatedAt: parsed.updatedAt });
+          } catch { /* skip */ }
+        }
+      }
+      try {
+        const store = JSON.parse(localStorage.getItem(PROPOSALS_KEY) || '{"proposals":[]}');
+        for (const p of store.proposals || []) {
+          if (p.snapshot) rows.push({ key: `saved:${p.id}`, snapshot: p.snapshot, updatedAt: p.updatedAt, title: p.title });
+        }
+      } catch { /* skip */ }
+      return rows.sort((a, b) => snapshotScore(b.snapshot) - snapshotScore(a.snapshot));
+    }
+
+    function saveProposal(userId, snapshot, title) {
+      const raw = localStorage.getItem(PROPOSALS_KEY);
+      const store = raw ? JSON.parse(raw) : { proposals: [] };
+      const now = new Date().toISOString();
+      const row = {
+        id: `${Date.now()}-recovered`,
+        userId,
+        title,
+        status: "in_progress",
+        snapshot,
+        createdAt: now,
+        updatedAt: now,
+      };
+      store.proposals = Array.isArray(store.proposals) ? store.proposals : [];
+      store.proposals.push(row);
+      localStorage.setItem(PROPOSALS_KEY, JSON.stringify(store));
+      return row;
+    }
+
+    const userId = readSessionUserId();
+    const sessionEl = document.getElementById("session");
+    sessionEl.innerHTML = userId
+      ? `<p class="ok">Signed-in user id: <code>${userId}</code></p>`
+      : `<p class="warn">Not signed in. Log in on the app first, then reload this page.</p>`;
+
+    const draftsEl = document.getElementById("drafts");
+    const drafts = listDrafts();
+    if (!drafts.length) {
+      draftsEl.innerHTML = "<p class=\"warn\">No drafts or saved proposals found in localStorage.</p>";
+    } else {
+      draftsEl.innerHTML = "<h2>Found snapshots (best first)</h2>" + drafts.map((d, i) => {
+        const s = d.snapshot;
+        const meters = s.meters?.length ?? 0;
+        const usage = (s.meters || []).reduce((n, m) => n + (m.monthlyKWh || []).filter((v) => v != null && Number(v) > 0).length, 0)
+          + (s.monthlyKWh || []).filter((v) => v != null && Number(v) > 0).length;
+        return `<div class="card"><strong>#${i + 1}</strong> score ${snapshotScore(s)} · meters ${meters} · usage cells ${usage}<br/>
+          <span class="muted">${d.title || d.key} · ${d.updatedAt || ""}</span><br/>
+          <button type="button" data-idx="${i}">Save as in-progress proposal</button></div>`;
+      }).join("");
+      draftsEl.querySelectorAll("button[data-idx]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          if (!userId) { alert("Sign in on the app first."); return; }
+          const d = drafts[Number(btn.dataset.idx)];
+          const title = d.title || `Recovered draft (${d.updatedAt?.slice(0, 10) || "local"})`;
+          saveProposal(userId, d.snapshot, title);
+          document.getElementById("importStatus").innerHTML = `<span class="ok">Saved “${title}”. Open <a href="/">Proposals</a> in the app.</span>`;
+        });
+      });
+    }
+
+    document.getElementById("importPartial").addEventListener("click", async () => {
+      if (!userId) { alert("Sign in on the app first."); return; }
+      const res = await fetch("/partial-recovered-snapshot.json");
+      const snapshot = await res.json();
+      const row = saveProposal(userId, snapshot, "Recovered (partial) — May 27");
+      document.getElementById("importStatus").innerHTML =
+        `<span class="ok">Saved “${row.title}”. In the app: Proposals → open this draft.</span>`;
+    });
+
+    document.getElementById("importPaste").addEventListener("click", () => {
+      if (!userId) { alert("Sign in on the app first."); return; }
+      try {
+        const snapshot = JSON.parse(document.getElementById("paste").value);
+        if (snapshot.v !== 1) throw new Error("Expected snapshot v:1");
+        saveProposal(userId, snapshot, "Imported snapshot");
+        document.getElementById("importStatus").innerHTML = `<span class="ok">Saved. Open Proposals in the app.</span>`;
+      } catch (e) {
+        alert("Invalid JSON: " + e.message);
+      }
+    });
+  </script>
+</body>
+</html>
