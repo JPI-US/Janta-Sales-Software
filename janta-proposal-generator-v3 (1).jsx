@@ -3781,6 +3781,19 @@ export default function JantaProposal({
               </div>
             )}
 
+            {includeUtilityBillEconomics && (
+              <div style={{ background: C.white, borderRadius: 10, padding: "14px 16px", border: `1px solid ${C.g200}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <div style={{ width: 4, height: 16, background: C.gold, borderRadius: 2 }} />
+                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: titleColor }}>Utility rate</h3>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Field label="Effective Rate" value={ratePerKWh} onChange={setRatePerKWh} type="number" unit="$/kWh" step={0.01} />
+                  <Field label="Rate Escalation" value={rateEsc} onChange={setRateEsc} type="number" unit="%/yr" />
+                </div>
+              </div>
+            )}
+
             {/* ── Project meters (name / number) ── */}
             {multiMeterMode && (
               <div style={{ background: C.white, borderRadius: 10, padding: "14px 16px", border: `1px solid ${C.g200}` }}>
@@ -3891,12 +3904,6 @@ export default function JantaProposal({
                     <Field label="Account #" value={account} onChange={setAccount} placeholder="0123456789" />
                     <Field label="Utility" value={utilityName} onChange={setUtilityName} placeholder="TXU Energy" />
                   </>
-                )}
-                {includeUtilityBillEconomics && (
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <Field label="Effective Rate" value={ratePerKWh} onChange={setRatePerKWh} type="number" unit="$/kWh" step={0.01} />
-                    <Field label="Rate Escalation" value={rateEsc} onChange={setRateEsc} type="number" unit="%/yr" />
-                  </div>
                 )}
             </div>
 
