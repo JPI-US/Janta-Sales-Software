@@ -10,8 +10,10 @@ import {
   crmStepLabel,
   crmSystemSummary,
 } from "./proposalCrm.js";
+import { getHubSpotStatus, syncHubSpot } from "./hubspotApi.js";
 import {
   deleteProposal,
+  dedupeProposalsForUser,
   listProposalsForUser,
   saveProposal,
 } from "./proposalStorage.js";
@@ -40,6 +42,10 @@ export default function ProposalsLibrary({
   const [search, setSearch] = useState("");
   const [downloadingId, setDownloadingId] = useState(null);
   const [statusBusyId, setStatusBusyId] = useState(null);
+  const [hubspotConfigured, setHubspotConfigured] = useState(false);
+  const [hubspotSyncing, setHubspotSyncing] = useState(false);
+  const [hubspotNote, setHubspotNote] = useState("");
+  const [dedupeBusy, setDedupeBusy] = useState(false);
 
   const loadProposals = useCallback(async () => {
     setLoading(true);
@@ -58,6 +64,59 @@ export default function ProposalsLibrary({
   useEffect(() => {
     loadProposals();
   }, [loadProposals]);
+
+  const runHubSpotSync = useCallback(async () => {
+    if (!userEmail) return;
+    setHubspotSyncing(true);
+    setHubspotNote("");
+    try {
+      const result = await syncHubSpot(userId, userEmail);
+      if (!result.configured) {
+        setHubspotNote(result.message || "HubSpot not configured on server.");
+        return;
+      }
+      const parts = [];
+      if (result.imported) parts.push(`${result.imported} imported`);
+      if (result.updated) parts.push(`${result.updated} updated from HubSpot`);
+      if (result.message) parts.push(result.message);
+      if (!parts.length) parts.push("Already in sync");
+      setHubspotNote(parts.join(" · "));
+      await loadProposals();
+    } catch (err) {
+      setHubspotNote(err.message || "HubSpot sync failed");
+    } finally {
+      setHubspotSyncing(false);
+    }
+  }, [userId, userEmail, loadProposals]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await getHubSpotStatus();
+        if (!cancelled) setHubspotConfigured(Boolean(status.configured));
+      } catch {
+        if (!cancelled) setHubspotConfigured(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleDedupe() {
+    if (!window.confirm("Remove duplicate projects? Keeps one copy per title (best data wins).")) return;
+    setDedupeBusy(true);
+    try {
+      const result = await dedupeProposalsForUser(userId);
+      setHubspotNote(`Removed ${result.removed} duplicate(s). ${result.remaining} projects remaining.`);
+      await loadProposals();
+    } catch (err) {
+      window.alert(err.message || "Dedupe failed");
+    } finally {
+      setDedupeBusy(false);
+    }
+  }
 
   const bg = isDark ? "#000000" : "#F3F4F6";
   const panel = isDark ? "#1A1510" : "#FFFFFF";
@@ -113,6 +172,7 @@ export default function ProposalsLibrary({
         title: p.title,
         snapshot: p.snapshot,
         status: nextStatus,
+        userEmail,
       });
       await loadProposals();
     } catch (err) {
@@ -181,6 +241,25 @@ export default function ProposalsLibrary({
           <button type="button" onClick={onSignOut} style={headerBtn(false)}>
             Sign out
           </button>
+          {hubspotConfigured ? (
+            <button
+              type="button"
+              onClick={runHubSpotSync}
+              disabled={hubspotSyncing}
+              style={headerBtn(false)}
+            >
+              {hubspotSyncing ? "Syncing HubSpot…" : "Import from HubSpot"}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={handleDedupe}
+            disabled={dedupeBusy}
+            style={headerBtn(false)}
+            title="Remove duplicate projects"
+          >
+            {dedupeBusy ? "Cleaning…" : "Remove duplicates"}
+          </button>
           <button type="button" onClick={handleNew} disabled={creating} style={headerBtn(true)}>
             {creating ? "Creating…" : "+ New project"}
           </button>
@@ -188,6 +267,21 @@ export default function ProposalsLibrary({
       </div>
 
       <div style={{ maxWidth: 1180, margin: "0 auto", padding: 20 }}>
+        {hubspotNote ? (
+          <div
+            style={{
+              background: isDark ? "#1A271F" : "#ECF8F5",
+              border: `1px solid ${isDark ? "#2D4A38" : "#CBECE4"}`,
+              borderRadius: 10,
+              padding: "10px 14px",
+              marginBottom: 14,
+              fontSize: 12,
+              color: isDark ? "#D9F2E3" : "#0D5C4A",
+            }}
+          >
+            {hubspotNote}
+          </div>
+        ) : null}
         <div
           style={{
             display: "flex",

@@ -1,4 +1,5 @@
 import { SNAPSHOT_VERSION } from "./proposalSnapshot.js";
+import { normalizeOptionalEquipment, collapseEquipmentForStorage } from "./optionalEquipment.js";
 
 export function buildProposalSnapshot(s) {
   return {
@@ -22,6 +23,8 @@ export function buildProposalSnapshot(s) {
     rateEsc: s.rateEsc,
     productionOnlyMode: s.productionOnlyMode,
     usageComparisonMode: s.usageComparisonMode,
+    savingsOnlyMode: s.savingsOnlyMode,
+    salesShowcaseMode: s.salesShowcaseMode,
     multiMeterMode: s.multiMeterMode,
     meters: s.meters,
     activeMeterIdx: s.activeMeterIdx,
@@ -30,10 +33,9 @@ export function buildProposalSnapshot(s) {
     region: s.region,
     systemSizeKw: s.systemSizeKw,
     pricingPerKW: s.pricingPerKW,
-    batteryName: s.batteryName,
-    batteryCost: s.batteryCost,
-    generatorName: s.generatorName,
-    generatorCost: s.generatorCost,
+    pricingUseRange: s.pricingUseRange,
+    pricingPerKWHigh: s.pricingPerKWHigh,
+    optionalEquipment: collapseEquipmentForStorage(s.optionalEquipment || []),
     optionalEquipmentOpen: s.optionalEquipmentOpen,
     useNrelApi: s.useNrelApi,
     nrelApiKey: s.nrelApiKey,
@@ -97,6 +99,8 @@ export function applyProposalSnapshot(snapshot, setters) {
   set(setters.setRateEsc, snapshot.rateEsc ?? "3");
   set(setters.setProductionOnlyMode, Boolean(snapshot.productionOnlyMode));
   set(setters.setUsageComparisonMode, Boolean(snapshot.usageComparisonMode));
+  set(setters.setSavingsOnlyMode, Boolean(snapshot.savingsOnlyMode));
+  set(setters.setSalesShowcaseMode, Boolean(snapshot.salesShowcaseMode));
   set(setters.setMultiMeterMode, Boolean(snapshot.multiMeterMode));
   if (Array.isArray(snapshot.meters) && snapshot.meters.length > 0) setters.setMeters(snapshot.meters);
   set(setters.setActiveMeterIdx, snapshot.activeMeterIdx ?? 0);
@@ -105,10 +109,9 @@ export function applyProposalSnapshot(snapshot, setters) {
   set(setters.setRegion, snapshot.region ?? "texas");
   set(setters.setSystemSizeKw, snapshot.systemSizeKw ?? "");
   set(setters.setPricingPerKW, snapshot.pricingPerKW);
-  set(setters.setBatteryName, snapshot.batteryName ?? "");
-  set(setters.setBatteryCost, snapshot.batteryCost ?? "");
-  set(setters.setGeneratorName, snapshot.generatorName ?? "");
-  set(setters.setGeneratorCost, snapshot.generatorCost ?? "");
+  set(setters.setPricingUseRange, Boolean(snapshot.pricingUseRange));
+  set(setters.setPricingPerKWHigh, snapshot.pricingPerKWHigh ?? "");
+  setters.setOptionalEquipment(normalizeOptionalEquipment(snapshot));
   set(setters.setOptionalEquipmentOpen, Boolean(snapshot.optionalEquipmentOpen));
   set(setters.setUseNrelApi, Boolean(snapshot.useNrelApi));
   set(setters.setNrelApiKey, snapshot.nrelApiKey);

@@ -1,16 +1,28 @@
+import { dedupeProposalList } from "../shared/proposalDedupe.js";
+import { isLegacyRandomUserId, proposalStorageKey } from "./proposalAccount.js";
+import {
+  mergeProposalLists,
+  readLocalProposals,
+  removeLocalProposal,
+  upsertLocalProposal,
+  writeLocalProposals,
+} from "./proposalLocalStore.js";
 import { snapshotDataScore, snapshotHasMeaningfulData } from "./proposalSnapshot.js";
+import { newProposalId } from "./proposalIds.js";
 import {
   clearDraftCloud,
   createProposalCloud,
   deleteProposalCloud,
+  getProposalCloud,
   listProposalsCloud,
   readDraftCloud,
-  updateProposalCloud,
+  upsertProposalCloud,
   writeDraftCloud,
 } from "./proposalsCloudApi.js";
+import { dedupeProposalsCloud } from "./hubspotApi.js";
 
-// re-export for callers that need direct cloud access
-export { createProposalCloud, updateProposalCloud } from "./proposalsCloudApi.js";
+export { proposalStorageKey, isLegacyRandomUserId } from "./proposalAccount.js";
+export { createProposalCloud, upsertProposalCloud } from "./proposalsCloudApi.js";
 
 export const PROPOSAL_STATUS_IN_PROGRESS = "in_progress";
 export const PROPOSAL_STATUS_READY = "ready";
@@ -30,37 +42,129 @@ export function deriveProposalTitle(snapshot) {
   return `Proposal ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
 }
 
-export async function listProposalsForUser(userId, { status } = {}) {
-  return listProposalsCloud(userId, { status });
+function normalizeAccountKey(userOrKey) {
+  return proposalStorageKey(userOrKey);
 }
 
-export async function saveProposal({ userId, id, title, snapshot, status = PROPOSAL_STATUS_IN_PROGRESS }) {
-  if (!userId || !snapshot) throw new Error("userId and snapshot are required");
-  const cleanTitle = String(title || "").trim() || deriveProposalTitle(snapshot);
-
-  if (id) {
-    return updateProposalCloud(userId, id, { title: cleanTitle, snapshot, status });
-  }
-  return createProposalCloud(userId, { title: cleanTitle, snapshot, status });
+function withAccountKey(proposal, accountKey) {
+  return { ...proposal, userId: accountKey };
 }
 
-export async function deleteProposal(proposalId, userId) {
-  return deleteProposalCloud(userId, proposalId);
-}
-
-export async function readSessionDraft(userId) {
-  if (!userId) return null;
+async function listProposalsCloudSafe(accountKey, options) {
   try {
-    return await readDraftCloud(userId);
+    const rows = await listProposalsCloud(accountKey, options);
+    return { rows, fromCloud: true, error: null };
+  } catch (err) {
+    return { rows: [], fromCloud: false, error: err };
+  }
+}
+
+export async function listProposalsForUser(userOrKey, { status } = {}) {
+  const accountKey = normalizeAccountKey(userOrKey);
+  if (!accountKey) return [];
+
+  const local = readLocalProposals(accountKey);
+  const { rows: cloud, fromCloud } = await listProposalsCloudSafe(accountKey, { status });
+
+  if (fromCloud) {
+    const merged = dedupeProposalList(mergeProposalLists(cloud, local));
+    writeLocalProposals(accountKey, merged);
+    if (status) return merged.filter((p) => p.status === status);
+    return merged;
+  }
+
+  const localDeduped = dedupeProposalList(local);
+  if (localDeduped.length !== local.length) writeLocalProposals(accountKey, localDeduped);
+
+  if (status) return localDeduped.filter((p) => p.status === status);
+  return localDeduped;
+}
+
+export async function saveProposal({
+  userId,
+  id,
+  title,
+  snapshot,
+  status = PROPOSAL_STATUS_IN_PROGRESS,
+  userEmail,
+}) {
+  const accountKey = normalizeAccountKey(userId);
+  if (!accountKey || !snapshot) throw new Error("account and snapshot are required");
+  const proposalId = id ? String(id).trim() : newProposalId();
+  const cleanTitle = String(title || "").trim() || deriveProposalTitle(snapshot);
+  const ownerEmail = String(userEmail || "").trim();
+  const now = new Date().toISOString();
+
+  const localRows = readLocalProposals(accountKey);
+  const existing = localRows.find((p) => p.id === proposalId);
+  const draft = {
+    ...(existing || {}),
+    id: proposalId,
+    userId: accountKey,
+    title: cleanTitle,
+    snapshot,
+    status: status ?? existing?.status ?? PROPOSAL_STATUS_IN_PROGRESS,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+  upsertLocalProposal(accountKey, draft);
+
+  try {
+    const saved = await upsertProposalCloud(accountKey, {
+      id: proposalId,
+      title: cleanTitle,
+      snapshot,
+      status: draft.status,
+      userEmail: ownerEmail,
+    });
+    upsertLocalProposal(accountKey, withAccountKey(saved, accountKey));
+    return saved;
+  } catch {
+    return draft;
+  }
+}
+
+export async function getProposalForUser(userOrKey, proposalId) {
+  const accountKey = normalizeAccountKey(userOrKey);
+  if (!accountKey || !proposalId) return null;
+  const local = readLocalProposals(accountKey).find((p) => p.id === proposalId);
+  try {
+    const row = await getProposalCloud(accountKey, proposalId);
+    if (row) upsertLocalProposal(accountKey, withAccountKey(row, accountKey));
+    return row || local || null;
+  } catch {
+    return local || null;
+  }
+}
+
+export async function deleteProposal(proposalId, userOrKey) {
+  const accountKey = normalizeAccountKey(userOrKey);
+  removeLocalProposal(accountKey, proposalId);
+  try {
+    await deleteProposalCloud(accountKey, proposalId);
+  } catch (err) {
+    const stillLocal = readLocalProposals(accountKey).some((p) => p.id === proposalId);
+    if (stillLocal) return true;
+    throw err;
+  }
+  return true;
+}
+
+export async function readSessionDraft(userOrKey) {
+  const accountKey = normalizeAccountKey(userOrKey);
+  if (!accountKey) return null;
+  try {
+    return await readDraftCloud(accountKey);
   } catch {
     return null;
   }
 }
 
-export async function writeSessionDraft(userId, snapshot, { force = false } = {}) {
-  if (!userId || !snapshot) return;
+export async function writeSessionDraft(userOrKey, snapshot, { force = false } = {}) {
+  const accountKey = normalizeAccountKey(userOrKey);
+  if (!accountKey || !snapshot) return;
   try {
-    const existing = await readSessionDraft(userId);
+    const existing = await readSessionDraft(accountKey);
     const prev = existing?.snapshot;
     const prevScore = snapshotDataScore(prev);
     const nextScore = snapshotDataScore(snapshot);
@@ -70,17 +174,68 @@ export async function writeSessionDraft(userId, snapshot, { force = false } = {}
       if (prevScore > nextScore + 2) return;
     }
 
-    await writeDraftCloud(userId, snapshot);
+    await writeDraftCloud(accountKey, snapshot);
   } catch {
     // ignore network errors for draft backup
   }
 }
 
-export async function clearSessionDraft(userId) {
-  if (!userId) return;
+export async function clearSessionDraft(userOrKey) {
+  const accountKey = normalizeAccountKey(userOrKey);
+  if (!accountKey) return;
   try {
-    await clearDraftCloud(userId);
+    await clearDraftCloud(accountKey);
   } catch {
     // ignore
   }
+}
+
+export async function dedupeProposalsForUser(userOrKey) {
+  const accountKey = normalizeAccountKey(userOrKey);
+  const result = await dedupeProposalsCloud(accountKey);
+  try {
+    const rows = await listProposalsCloud(accountKey);
+    writeLocalProposals(accountKey, rows);
+  } catch {
+    const local = readLocalProposals(accountKey);
+    const merged = mergeProposalLists(local);
+    writeLocalProposals(accountKey, merged);
+    return {
+      removed: Math.max(0, local.length - merged.length),
+      remaining: merged.length,
+    };
+  }
+  return result;
+}
+
+/** Copy proposals from an old random user id folder into the email-based account key. */
+export async function migrateLegacyProposalAccount(accountKey, legacyUserId) {
+  if (!accountKey || !legacyUserId || accountKey === legacyUserId) return;
+  if (!isLegacyRandomUserId(legacyUserId, accountKey)) return;
+
+  const { rows: legacyCloud } = await listProposalsCloudSafe(legacyUserId);
+  const legacyLocal = readLocalProposals(legacyUserId);
+  const legacyRows = mergeProposalLists(legacyCloud, legacyLocal);
+  if (!legacyRows.length) return;
+
+  const current = mergeProposalLists(await listProposalsForUser(accountKey), readLocalProposals(accountKey));
+  const currentIds = new Set(current.map((p) => p.id));
+
+  for (const row of legacyRows) {
+    if (currentIds.has(row.id)) continue;
+    try {
+      const created = await createProposalCloud(accountKey, {
+        id: row.id,
+        title: row.title,
+        snapshot: row.snapshot,
+        status: row.status || PROPOSAL_STATUS_IN_PROGRESS,
+      });
+      upsertLocalProposal(accountKey, withAccountKey({ ...created, createdAt: row.createdAt, updatedAt: row.updatedAt }, accountKey));
+    } catch {
+      upsertLocalProposal(accountKey, withAccountKey({ ...row, userId: accountKey }, accountKey));
+    }
+  }
+
+  const merged = mergeProposalLists(await listProposalsForUser(accountKey), legacyRows.map((r) => withAccountKey(r, accountKey)));
+  writeLocalProposals(accountKey, merged);
 }

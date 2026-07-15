@@ -1,7 +1,35 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useId } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { applyProposalSnapshot, buildProposalSnapshot } from "./src/jantaProposalPersistence.js";
+import {
+  activeEquipmentItems,
+  collapseEquipmentForStorage,
+  createEmptyEquipment,
+  ensureEquipmentEditorRows,
+  equipmentHasContent,
+  equipmentLineTotal,
+  equipmentQuantity,
+  equipmentRowsOfKind,
+  equipmentSummaryLine,
+  formatEquipmentLabel,
+  parseEquipmentUnitCost,
+  patchEquipmentItem,
+  presetCostForEquipment,
+  sortEquipmentForEditor,
+} from "./src/optionalEquipment.js";
 import { readSessionDraft } from "./src/proposalStorage.js";
+import {
+  DEFAULT_PRICING_PER_KW,
+  formatUsd,
+  formatUsdRange,
+  formatUsdPerW,
+  formatUsdPerWFromTotal,
+  formatUsdPerWRange,
+  formatUsdPerWRangeFromTotals,
+  usdPerWatt,
+  resolveSolarPricePerKw,
+  solarGrossForKw,
+} from "./src/solarPricing.js";
 
 /** Same-origin absolute URL so image loads are unambiguous for canvas/PDF. */
 function jantaPublicAssetUrl(relativePath) {
@@ -11,67 +39,82 @@ function jantaPublicAssetUrl(relativePath) {
   return `${window.location.origin}${base}${path}`;
 }
 
-/**
- * html2canvas (used by html2pdf.js) often renders SVG <img> sources as blank; rasterizing to PNG fixes it.
- * Returns a function that restores original src attributes.
- */
-async function rasterizeImagesForHtml2Pdf(root) {
+async function waitForImages(root) {
   const imgs = Array.from(root.querySelectorAll("img"));
-  const revert = imgs.map((img) => [img, img.getAttribute("src")]);
   await Promise.all(
     imgs.map(
       (img) =>
         new Promise((resolve) => {
-          const finish = () => resolve();
-          const paint = async () => {
-            try {
-              await img.decode();
-            } catch (_) {
-              /* ignore */
-            }
-            const w = img.naturalWidth;
-            const h = img.naturalHeight;
-            if (!w || !h) {
-              finish();
-              return;
-            }
-            try {
-              const canvas = document.createElement("canvas");
-              const scale = 2;
-              canvas.width = Math.max(1, Math.floor(w * scale));
-              canvas.height = Math.max(1, Math.floor(h * scale));
-              const ctx = canvas.getContext("2d");
-              if (!ctx) {
-                finish();
-                return;
-              }
-              ctx.imageSmoothingEnabled = true;
-              ctx.imageSmoothingQuality = "high";
-              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-              img.src = canvas.toDataURL("image/png");
-              try {
-                await img.decode();
-              } catch (_) {
-                /* ignore */
-              }
-            } catch (_) {
-              /* Tainted canvas or unsupported draw — keep original src */
-            }
-            finish();
-          };
-          if (img.complete) paint();
-          else {
-            img.onload = () => paint();
-            img.onerror = finish;
-            setTimeout(finish, 8000);
+          if (img.complete && img.naturalWidth > 0) {
+            resolve();
+            return;
           }
+          const done = () => resolve();
+          img.addEventListener("load", done, { once: true });
+          img.addEventListener("error", done, { once: true });
+          setTimeout(done, 10000);
         })
     )
   );
+}
+
+/**
+ * html2canvas (used by html2pdf.js) does not reliably honor CSS filters and often
+ * drops cross-origin images. Bake each <img> to an inline PNG data URL first.
+ * The Adam Boudissa signature asset is white-on-black — always invert when baking
+ * so it prints as dark ink on white paper.
+ */
+async function rasterizeImagesForHtml2Pdf(root) {
+  const imgs = Array.from(root.querySelectorAll("img"));
+  const revert = imgs.map((img) => [img, img.getAttribute("src"), img.style.filter]);
+
+  await waitForImages(root);
+
+  await Promise.all(
+    imgs.map(async (img) => {
+      try {
+        await img.decode();
+      } catch (_) {
+        /* ignore */
+      }
+      const w = img.naturalWidth;
+      const h = img.naturalHeight;
+      if (!w || !h) return;
+
+      const isSignature = img.alt === "Adam Boudissa signature";
+      const scale = 2;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.floor(w * scale));
+      canvas.height = Math.max(1, Math.floor(h * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      if (isSignature) {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.filter = "invert(1)";
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      } else {
+        const filter = window.getComputedStyle(img).filter;
+        if (filter && filter !== "none") ctx.filter = filter;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      }
+
+      img.src = canvas.toDataURL("image/png");
+      img.style.filter = "none";
+      try {
+        await img.decode();
+      } catch (_) {
+        /* ignore */
+      }
+    })
+  );
+
   return () => {
-    for (const [img, src] of revert) {
+    for (const [img, src, filter] of revert) {
       if (src != null) img.setAttribute("src", src);
       else img.removeAttribute("src");
+      img.style.filter = filter || "";
     }
   };
 }
@@ -85,6 +128,47 @@ async function rasterizeImagesForHtml2Pdf(root) {
  ══════════════════════════════════════════════════════════════════════
 */
 
+/** Janta produces ~1.5× the kWh/kW of conventional fixed-tilt PV at the same site. */
+const JANTA_VS_TRADITIONAL_CF_RATIO = 1.5;
+
+/** Switch volume displays from kWh to MWh when any relevant value exceeds 99,999 kWh. */
+const ENERGY_MWH_THRESHOLD_KWH = 100000;
+
+function shouldUseMwhDisplay(kwhValues) {
+  const vals = (Array.isArray(kwhValues) ? kwhValues : [kwhValues]).flat();
+  return Math.max(0, ...vals.map((v) => Math.abs(Number(v) || 0))) >= ENERGY_MWH_THRESHOLD_KWH;
+}
+
+function scaleEnergySeriesForDisplay(series, useMwh) {
+  if (!useMwh || !series) return series;
+  return series.map((v) => (v == null ? v : (Number(v) || 0) / 1000));
+}
+
+function formatMwhNumber(mwh) {
+  const n = Number(mwh) || 0;
+  const maxFrac = n >= 100 ? 0 : n >= 10 ? 1 : 2;
+  return n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: maxFrac });
+}
+
+function formatEnergyKwh(kwh, useMwh) {
+  const n = Number(kwh) || 0;
+  if (!useMwh) return Math.round(n).toLocaleString();
+  return formatMwhNumber(n / 1000);
+}
+
+function energyUnitLabel(useMwh, { perYear = false } = {}) {
+  if (useMwh) return perYear ? "MWh/yr" : "MWh";
+  return perYear ? "kWh/yr" : "kWh";
+}
+
+function energySeriesLegendLabel(name, useMwh) {
+  return `${name} (${energyUnitLabel(useMwh)})`;
+}
+
+function formatEnergyWithUnit(kwh, useMwh, { perYear = false } = {}) {
+  return `${formatEnergyKwh(kwh, useMwh)} ${energyUnitLabel(useMwh, { perYear })}`;
+}
+
 // ─── Regional production curves (kWh per kW-DC per month) ───────────
 // When "Use NREL PVWatts API" is on, monthly/annual values come from NREL's PVWatts v8 instead.
 const REGIONS = {
@@ -94,7 +178,6 @@ const REGIONS = {
     lon: -89.65,
     monthlyPerKW: [130, 140, 175, 190, 210, 215, 205, 195, 180, 165, 140, 123],
     capacityFactor: 0.231,
-    traditionalCF: 0.178,
     credits: ["itc", "il_shines", "ameren_rebate"],
   },
   california: {
@@ -103,7 +186,6 @@ const REGIONS = {
     lon: -119.3,
     monthlyPerKW: [175, 185, 230, 245, 265, 270, 260, 250, 230, 210, 180, 160],
     capacityFactor: 0.275,
-    traditionalCF: 0.200,
     credits: ["itc"],
   },
   texas: {
@@ -112,7 +194,6 @@ const REGIONS = {
     lon: -96.797,
     monthlyPerKW: [155, 165, 210, 225, 245, 250, 240, 230, 210, 190, 160, 142],
     capacityFactor: 2422 / 8760,
-    traditionalCF: 0.189,
     credits: ["itc"],
   },
   arizona: {
@@ -121,7 +202,6 @@ const REGIONS = {
     lon: -112.07,
     monthlyPerKW: [190, 200, 250, 265, 290, 295, 280, 270, 250, 225, 195, 175],
     capacityFactor: 0.305,
-    traditionalCF: 0.220,
     credits: ["itc"],
   },
   florida: {
@@ -130,7 +210,6 @@ const REGIONS = {
     lon: -81.38,
     monthlyPerKW: [160, 170, 210, 225, 240, 235, 225, 220, 200, 180, 160, 145],
     capacityFactor: 0.238,
-    traditionalCF: 0.175,
     credits: ["itc"],
   },
   northeast: {
@@ -139,7 +218,6 @@ const REGIONS = {
     lon: -74.0,
     monthlyPerKW: [110, 120, 160, 180, 200, 210, 205, 190, 170, 145, 115, 100],
     capacityFactor: 0.185,
-    traditionalCF: 0.142,
     credits: ["itc"],
   },
   midwest: {
@@ -148,13 +226,24 @@ const REGIONS = {
     lon: -84.5,
     monthlyPerKW: [120, 135, 170, 190, 215, 220, 210, 200, 180, 155, 125, 110],
     capacityFactor: 0.210,
-    traditionalCF: 0.160,
+    credits: ["itc"],
+  },
+  usvi: {
+    label: "U.S. Virgin Islands",
+    lat: 18.34,
+    lon: -64.93,
+    monthlyPerKW: [168, 175, 215, 230, 245, 240, 235, 230, 215, 200, 178, 162],
+    capacityFactor: 0.258,
     credits: ["itc"],
   },
 };
 
+for (const region of Object.values(REGIONS)) {
+  region.traditionalCF = region.capacityFactor / JANTA_VS_TRADITIONAL_CF_RATIO;
+}
+
 /** Janta tower increments — system kW is always an integer multiple of this value. */
-const SYSTEM_SIZE_STEP_KW = 5.4;
+const SYSTEM_SIZE_STEP_KW = 5.6;
 const SQFT_PER_ACRE = 43560;
 const THEME_KEY = "janta_dark_mode_v1";
 
@@ -169,21 +258,50 @@ function formatKw(kw) {
   return (Math.round(kw * 10) / 10).toFixed(1);
 }
 
-/** Proposal/UI label — always prefixed with "Meter" (e.g. Meter 60-01). */
+/** Switch capacity displays from kW to MW at this scale and above. */
+const SYSTEM_MW_DISPLAY_THRESHOLD_KW = 1000;
+
+function shouldUseMwDisplay(kwValues) {
+  const vals = (Array.isArray(kwValues) ? kwValues : [kwValues]).flat();
+  return Math.max(0, ...vals.map((v) => Math.abs(Number(v) || 0))) >= SYSTEM_MW_DISPLAY_THRESHOLD_KW;
+}
+
+function formatSystemKw(kw, useMw) {
+  const n = Number(kw) || 0;
+  if (!useMw) return formatKw(n);
+  return formatMwhNumber(n / 1000);
+}
+
+function systemUnitLabel(useMw) {
+  return useMw ? "MW" : "kW";
+}
+
+function formatSystemWithUnit(kw, useMw) {
+  return `${formatSystemKw(kw, useMw)} ${systemUnitLabel(useMw)}`;
+}
+
+/** Show the meter label exactly as entered — no extra "Meter" prefix in the UI. */
 function formatMeterDisplayName(name, meterNumber = "") {
   const n = String(name || "").trim();
+  if (n) return n;
   const num = String(meterNumber || "").trim();
-  if (/^meter\s/i.test(n)) return n;
-  if (num) return `Meter ${num}`;
-  if (n) return `Meter ${n}`;
-  return "Meter";
+  if (num) return num;
+  return "Untitled meter";
+}
+
+function isAutoMeterName(name, meterNumber) {
+  const n = String(name || "").trim();
+  if (!n) return true;
+  const fromNum = autoMeterNameFromNumber(meterNumber);
+  if (fromNum && n === fromNum) return true;
+  if (/^Meter [A-Z]$/i.test(n)) return true;
+  return false;
 }
 
 function createMeter(index = 0) {
-  const letter = String.fromCharCode(65 + (index % 26));
   return {
     id: `meter-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 6)}`,
-    name: `Meter ${letter}`,
+    name: "",
     account: "",
     billText: "",
     billFileName: "",
@@ -316,12 +434,11 @@ function extractMetersFromBill(text) {
 }
 
 function meterRecordFromExtracted(data, index = 0) {
-  const letter = String.fromCharCode(65 + (index % 26));
   const name = data.meterNumber
-    ? autoMeterNameFromNumber(data.meterNumber) || `Meter ${data.meterNumber}`
+    ? autoMeterNameFromNumber(data.meterNumber)
     : data.account && data.account.length >= 4
       ? `Meter …${data.account.slice(-4)}`
-      : `Meter ${letter}`;
+      : "";
   return {
     ...createMeter(index),
     name,
@@ -334,7 +451,7 @@ function meterRecordFromExtracted(data, index = 0) {
 }
 
 function suggestMeterName(parsed, fallbackName) {
-  if (parsed.meterNumber) return autoMeterNameFromNumber(parsed.meterNumber) || `Meter ${parsed.meterNumber}`;
+  if (parsed.meterNumber) return autoMeterNameFromNumber(parsed.meterNumber);
   if (parsed.account && parsed.account.length >= 4) return `Meter …${parsed.account.slice(-4)}`;
   return fallbackName;
 }
@@ -359,6 +476,124 @@ function formatUsageSavedAt(ts) {
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+function monthlyTraditionalProd(monthlyJantaProd, effectiveCF, traditionalCF) {
+  if (!effectiveCF || !traditionalCF) return monthlyJantaProd.map(() => 0);
+  const ratio = traditionalCF / effectiveCF;
+  return monthlyJantaProd.map((v) => Math.round(Number(v) * ratio));
+}
+
+function formatCreditPerW(amount, amountHigh, capacityKw, useRange) {
+  if (!capacityKw || capacityKw <= 0 || !amount) return "—";
+  if (useRange && amountHigh != null && Math.round(amount) !== Math.round(amountHigh)) {
+    const lo = usdPerWatt(amount, capacityKw);
+    const hi = usdPerWatt(amountHigh, capacityKw);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return "—";
+    if (Math.abs(lo - hi) < 0.005) return formatUsdPerW(lo);
+    return `$${Math.min(lo, hi).toFixed(2)} – $${Math.max(lo, hi).toFixed(2)}/W`;
+  }
+  return formatUsdPerWFromTotal(amount, capacityKw);
+}
+
+function buildProductionChartConfig({
+  salesShowcase,
+  hasUsage,
+  monthlyProd,
+  monthlyTradProd,
+  monthlyKWhNumeric,
+  usageMissingMask = [],
+  forPdf = false,
+  chartProdColor,
+  chartUsageColor,
+  chartTradColor,
+  screenDark,
+  useMwh = false,
+}) {
+  const tradColor = forPdf ? C.g700 : chartTradColor;
+  const prodColor = forPdf ? C.gold : chartProdColor;
+  const usageColor = forPdf ? C.navy : chartUsageColor;
+  const missingColor = screenDark ? "#E85D5D" : "#D64545";
+  const usageMissingLegend = usageMissingMask.some(Boolean)
+    ? [{ label: "Usage not provided", color: missingColor }]
+    : [];
+  const scale = (arr) => scaleEnergySeriesForDisplay(arr, useMwh);
+  const valueUnit = useMwh ? "MWh" : "kWh";
+
+  if (salesShowcase) {
+    if (hasUsage) {
+      return {
+        title: "Janta Power Comparative Analysis",
+        chart: {
+          data: scale(monthlyProd),
+          data2: scale(monthlyTradProd),
+          data3: scale(monthlyKWhNumeric),
+          rawData: monthlyProd,
+          rawData2: monthlyTradProd,
+          rawData3: monthlyKWhNumeric,
+          missingMask3: usageMissingMask,
+          color1: prodColor,
+          color2: tradColor,
+          color3: usageColor,
+          valueUnit,
+          legend: [
+            { label: energySeriesLegendLabel("Janta Production", useMwh), color: prodColor },
+            { label: energySeriesLegendLabel("Traditional Solar", useMwh), color: tradColor },
+            { label: energySeriesLegendLabel("Usage", useMwh), color: usageColor },
+            ...usageMissingLegend,
+          ],
+        },
+      };
+    }
+    return {
+      title: "Janta Power Comparative Analysis",
+      chart: {
+        data: scale(monthlyProd),
+        data2: scale(monthlyTradProd),
+        rawData: monthlyProd,
+        rawData2: monthlyTradProd,
+        color1: prodColor,
+        color2: tradColor,
+        valueUnit,
+        legend: [
+          { label: energySeriesLegendLabel("Janta Production", useMwh), color: prodColor },
+          { label: energySeriesLegendLabel("Traditional Solar", useMwh), color: tradColor },
+        ],
+      },
+    };
+  }
+
+  if (hasUsage) {
+    return {
+      title: "Janta Power Comparative Analysis",
+      chart: {
+        data: scale(monthlyProd),
+        data2: scale(monthlyKWhNumeric),
+        rawData: monthlyProd,
+        rawData2: monthlyKWhNumeric,
+        missingMask2: usageMissingMask,
+        color1: prodColor,
+        color2: usageColor,
+        valueUnit,
+        legend: [
+          { label: energySeriesLegendLabel("Janta Energy Production", useMwh), color: prodColor },
+          { label: energySeriesLegendLabel("Current Energy Usage", useMwh), color: usageColor },
+          ...usageMissingLegend,
+        ],
+      },
+    };
+  }
+
+  return {
+    title: "Janta Power Month-Month Production",
+    chart: {
+      data: scale(monthlyProd),
+      rawData: monthlyProd,
+      color1: prodColor,
+      valueUnit,
+      legend: [{ label: energySeriesLegendLabel("Janta Energy Production", useMwh), color: prodColor }],
+    },
+  };
+}
+
 function computeMeterBundle(meter, ctx) {
   const monthlyKWh = meter.monthlyKWh || new Array(12).fill(null);
   const monthlyKWhNumeric = monthlyKWh.map((v) => (v == null ? 0 : Number(v)));
@@ -374,12 +609,13 @@ function computeMeterBundle(meter, ctx) {
   const p = parseFloat(t.replace(/kw/gi, "").replace(/,/g, ""));
   const effectiveSize = t === "" ? optimalKw : (Number.isFinite(p) ? snapSystemSizeKw(p) : optimalKw);
   const monthlyProd = ctx.effectiveMonthlyPerKW.map((m) => Math.round(m * effectiveSize));
+  const monthlyTradProd = monthlyTraditionalProd(monthlyProd, ctx.effectiveCF, ctx.traditionalCF);
   const annualProd = Math.round(ctx.effectiveAnnualPerKW * effectiveSize);
   const requiredKw = ctx.effectiveAnnualPerKW > 0 ? annualKWh / ctx.effectiveAnnualPerKW : 0;
   const offsetPct = requiredKw > 0 ? (effectiveSize / requiredKw) * 100 : 0;
   return {
     id: meter.id,
-    name: meter.name || "Meter",
+    name: meter.name || "",
     meterNumber: meter.meterNumber || "",
     account: meter.account || "",
     monthlyKWh,
@@ -390,6 +626,7 @@ function computeMeterBundle(meter, ctx) {
     effectiveSize,
     optimalKw,
     monthlyProd,
+    monthlyTradProd,
     annualProd,
     offsetPct,
     hasMonthlyUsageData: monthlyKWh.some((v) => v != null && Number(v) > 0),
@@ -413,6 +650,7 @@ const STATE_TO_REGION = {
   TX: "texas",
   AZ: "arizona",
   FL: "florida",
+  VI: "usvi",
   NY: "northeast", NJ: "northeast", PA: "northeast", CT: "northeast", MA: "northeast", RI: "northeast", VT: "northeast", NH: "northeast", ME: "northeast",
   OH: "midwest", MI: "midwest", MN: "midwest", MO: "midwest", WI: "midwest", IA: "midwest", IN: "midwest", KS: "midwest", NE: "midwest", ND: "midwest", SD: "midwest",
 };
@@ -425,6 +663,7 @@ const REGION_LAND_VALUE_PER_ACRE = {
   florida: 11000,
   northeast: 14000,
   midwest: 9500,
+  usvi: 18000,
 };
 
 const STATE_LAND_VALUE_PER_ACRE = {
@@ -433,7 +672,7 @@ const STATE_LAND_VALUE_PER_ACRE = {
   OH: 9000, MI: 8500, MN: 8000, MO: 7500, WI: 8000, IA: 9000, IN: 8500, KS: 6500, NE: 6000, ND: 5000, SD: 5500,
   CO: 7000, OR: 8500, WA: 12000, NC: 8500, SC: 7000, GA: 8000, VA: 9000, MD: 11500, DE: 10000,
   OK: 6000, NM: 4500, NV: 5000, ID: 6500, UT: 6000, MT: 4500, WY: 3500, AK: 2500, HI: 26000, LA: 6500, MS: 5500,
-  AL: 6500, AR: 6000, KY: 6000, TN: 7000, WV: 5000, DC: 20000,
+  AL: 6500, AR: 6000, KY: 6000, TN: 7000, WV: 5000, DC: 20000, VI: 18000,
 };
 
 const COUNTY_LAND_VALUE_PER_ACRE = {
@@ -474,6 +713,7 @@ function regionFromCoordinates(lat, lon) {
   if (lat >= 25 && lat <= 37 && lon >= -107 && lon <= -93) return "texas";
   if (lat >= 31 && lat <= 38 && lon >= -115 && lon <= -109) return "arizona";
   if (lat >= 24 && lat <= 31 && lon >= -88 && lon <= -79) return "florida";
+  if (lat >= 17.5 && lat <= 18.6 && lon >= -65.1 && lon <= -64.2) return "usvi";
   if (lat >= 39 && lon >= -80) return "northeast";
   if (lat >= 36 && lon <= -80 && lon >= -104) return "midwest";
   return null;
@@ -498,8 +738,12 @@ function parseAddressHints(address = "") {
 
   if (!out.stateAbbr) {
     const lower = txt.toLowerCase();
-    const stateName = Object.keys(STATE_NAME_TO_ABBR).find((s) => lower.includes(s));
-    if (stateName) out.stateAbbr = STATE_NAME_TO_ABBR[stateName];
+    if (/u\.?s\.?\s*virgin\s*islands|\busvi\b|st\.?\s*thomas|st\.?\s*croix|st\.?\s*john/.test(lower)) {
+      out.stateAbbr = "VI";
+    } else {
+      const stateName = Object.keys(STATE_NAME_TO_ABBR).find((s) => lower.includes(s));
+      if (stateName) out.stateAbbr = STATE_NAME_TO_ABBR[stateName];
+    }
   }
 
   return out;
@@ -513,6 +757,7 @@ function regionFromZip(zip = "") {
   if (first === 7) return "texas";
   if (first === 8) return "arizona";
   if (first === 3) return "florida";
+  if (zip.startsWith("008")) return "usvi";
   if (first <= 2) return "northeast";
   if (first >= 4 && first <= 6) return "midwest";
   return null;
@@ -536,6 +781,7 @@ function detectRegionFromLocation({ address, lat, lon, utilityName }) {
   if (util.includes("ameren")) return "illinois";
   if (util.includes("edison") || util.includes("sce")) return "california";
   if (util.includes("oncor") || util.includes("ercot") || util.includes("txu")) return "texas";
+  if (util.includes("wapa") || util.includes("virgin islands")) return "usvi";
   return "texas";
 }
 
@@ -546,6 +792,7 @@ function detectStateFromLocation({ address, utilityName }) {
   if (util.includes("ameren")) return "IL";
   if (util.includes("edison") || util.includes("sce")) return "CA";
   if (util.includes("oncor") || util.includes("ercot") || util.includes("txu")) return "TX";
+  if (util.includes("wapa") || util.includes("virgin islands")) return "VI";
   return "TX";
 }
 
@@ -717,6 +964,7 @@ const STATE_INCENTIVES = {
   TX: { name: "Texas", tax: 0, propExempt: true, salesExempt: false, netMetering: "Varies by utility", srec: null, rebates: [{ name: "Oncor/AE/CPS Utility Rebates", type: "varies" }], notes: "Property tax exempt. No state income tax. Utility-level rebates (Oncor, Austin Energy, CPS Energy). Buyback rates vary by REP." },
   UT: { name: "Utah", tax: 0, propExempt: false, salesExempt: false, netMetering: "Export credit", srec: null, rebates: [], notes: "Export credit program. Limited state incentives." },
   VT: { name: "Vermont", tax: 0, propExempt: true, salesExempt: true, netMetering: "Yes", srec: null, rebates: [], notes: "Property & sales tax exempt. Net metering." },
+  VI: { name: "U.S. Virgin Islands", tax: 0, propExempt: false, salesExempt: false, netMetering: "Varies", srec: null, rebates: [], notes: "Federal commercial ITC may apply. WAPA utility. Grid power averages ~$0.41/kWh." },
   VA: { name: "Virginia", tax: 0, propExempt: true, salesExempt: false, netMetering: "Yes", srec: { perMWh: 15, years: 15 }, rebates: [], notes: "SREC market. Property tax exemption." },
   WA: { name: "Washington", tax: 0, propExempt: false, salesExempt: true, netMetering: "Yes", srec: null, rebates: [], notes: "Sales tax exemption. Net metering. No state income tax." },
   WV: { name: "West Virginia", tax: 0, propExempt: false, salesExempt: false, netMetering: "Yes", srec: null, rebates: [], notes: "Net metering. Limited incentives." },
@@ -726,7 +974,6 @@ const STATE_INCENTIVES = {
 };
 
 // Default project pricing ($/kW). User-editable in Step 2.
-const DEFAULT_PRICING_PER_KW = 3000;
 
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const HOURS_PER_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31].map((d) => d * 24);
@@ -1122,37 +1369,69 @@ function Toggle({ label, checked, onChange, disabled = false, style }) {
   );
 }
 
-function BarChart({ data, data2, labels, color1 = C.navy, color2 = C.gold, height = 170, legend, showBarValues = false, missingMask1, missingMask2, missingBarColor = "#D64545", maxScale, valueUnit = "kWh", rawData, rawData2 }) {
+function formatBarChartEnergyValue(displayVal, valueUnit) {
+  const n = Number(displayVal) || 0;
+  if (valueUnit === "kW") return n.toFixed(1);
+  if (valueUnit === "MWh") return formatMwhNumber(n);
+  return Math.round(n).toLocaleString();
+}
+
+function formatBarChartEnergyTooltip(rawKwh, valueUnit) {
+  const n = Number(rawKwh) || 0;
+  if (valueUnit === "MWh") return `${formatMwhNumber(n / 1000)} MWh`;
+  return `${Math.round(n).toLocaleString()} kWh`;
+}
+
+function BarChart({ data, data2, data3, labels, color1 = C.navy, color2 = C.gold, color3 = C.g700, height = 170, legend, showBarValues = false, missingMask1, missingMask2, missingMask3, missingBarColor = "#D64545", maxScale, valueUnit = "kWh", rawData, rawData2, rawData3 }) {
   const eff1 = data.map((v, i) => (missingMask1?.[i] ? 0 : Number(v) || 0));
   const eff2 = (data2 || []).map((v, i) => (missingMask2?.[i] ? 0 : Number(v) || 0));
-  const max = maxScale ?? Math.max(...eff1, ...eff2, 1);
+  const eff3 = (data3 || []).map((v, i) => (missingMask3?.[i] ? 0 : Number(v) || 0));
+  const max = maxScale ?? Math.max(...eff1, ...eff2, ...eff3, 1);
   const tooltipRaw1 = rawData ?? data;
   const tooltipRaw2 = rawData2 ?? data2;
-  const [hoverBar, setHoverBar] = useState(null); // { idx, series: 1 | 2 }
+  const tooltipRaw3 = rawData3 ?? data3;
+  const [hoverBar, setHoverBar] = useState(null); // { idx, series: 1 | 2 | 3 }
+  const seriesMissing = (series, idx) => {
+    if (series === 3) return missingMask3?.[idx];
+    if (series === 2) return missingMask2?.[idx];
+    return missingMask1?.[idx];
+  };
+  const seriesColor = (series, idx) => {
+    if (seriesMissing(series, idx)) return missingBarColor;
+    if (series === 3) return color3;
+    if (series === 2) return color2;
+    return color1;
+  };
+  const seriesValue = (series, idx) => {
+    if (series === 3) return Number(data3?.[idx] || 0);
+    if (series === 2) return Number(data2?.[idx] || 0);
+    return Number(data[idx] || 0);
+  };
+  const seriesTooltipValue = (series, idx) => {
+    if (series === 3) return Number(tooltipRaw3?.[idx] || 0);
+    if (series === 2) return Number(tooltipRaw2?.[idx] || 0);
+    return Number(tooltipRaw1[idx] || 0);
+  };
   return (
     <div style={{ position: "relative" }}>
       {hoverBar != null && (
         <div style={{
           position: "absolute", top: -6, left: "50%", transform: "translateX(-50%)",
-          background: hoverBar.series === 2
-            ? (missingMask2?.[hoverBar.idx] ? missingBarColor : color2)
-            : (missingMask1?.[hoverBar.idx] ? missingBarColor : color1),
+          background: seriesColor(hoverBar.series, hoverBar.idx),
           color: "#F8F2E8", borderRadius: 6, padding: "6px 8px",
           fontSize: 10, fontFamily: fontSans, zIndex: 2, pointerEvents: "none", whiteSpace: "nowrap",
           boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
         }}>
           <div style={{ fontWeight: 700, marginBottom: 2 }}>{labels[hoverBar.idx]}</div>
-          {hoverBar.series === 2 && missingMask2?.[hoverBar.idx] ? (
-            <div>Not provided</div>
-          ) : hoverBar.series === 1 && missingMask1?.[hoverBar.idx] ? (
+          {seriesMissing(hoverBar.series, hoverBar.idx) ? (
             <div>Not provided</div>
           ) : valueUnit === "kW" ? (
             <>
-              <div>{Number(hoverBar.series === 2 ? (data2?.[hoverBar.idx] || 0) : (data[hoverBar.idx] || 0)).toFixed(2)} avg kW</div>
-              <div>{Math.round(Number(hoverBar.series === 2 ? (tooltipRaw2?.[hoverBar.idx] || 0) : (tooltipRaw1[hoverBar.idx] || 0))).toLocaleString()} kWh</div>
+              <div>{seriesValue(hoverBar.series, hoverBar.idx).toFixed(2)} avg kW</div>
+              <div>{formatBarChartEnergyTooltip(seriesTooltipValue(hoverBar.series, hoverBar.idx), "kWh")}</div>
             </>
           ) : (
-            <div>{Math.round(Number(hoverBar.series === 2 ? (tooltipRaw2?.[hoverBar.idx] || 0) : (tooltipRaw1[hoverBar.idx] || 0))).toLocaleString()} kWh</div>
+            <div>{formatBarChartEnergyTooltip(seriesTooltipValue(hoverBar.series, hoverBar.idx), valueUnit)}</div>
           )}
         </div>
       )}
@@ -1191,7 +1470,7 @@ function BarChart({ data, data2, labels, color1 = C.navy, color2 = C.gold, heigh
                       pointerEvents: "none",
                     }}
                   >
-                    {valueUnit === "kW" ? Number(v).toFixed(1) : Math.round(Number(v)).toLocaleString()}
+                    {formatBarChartEnergyValue(v, valueUnit)}
                   </span>
                 )}
               </div>
@@ -1221,7 +1500,38 @@ function BarChart({ data, data2, labels, color1 = C.navy, color2 = C.gold, heigh
                         pointerEvents: "none",
                       }}
                     >
-                      {valueUnit === "kW" ? Number(data2[i] || 0).toFixed(1) : Math.round(Number(data2[i] || 0)).toLocaleString()}
+                      {formatBarChartEnergyValue(data2[i] || 0, valueUnit)}
+                    </span>
+                  )}
+                </div>
+              )}
+              {data3 && (
+                <div
+                  onMouseEnter={() => setHoverBar({ idx: i, series: 3 })}
+                  style={{
+                    flex: 1,
+                    height: `${Math.max(((missingMask3?.[i] ? 0 : (data3[i] || 0)) / max) * 100, 1)}%`,
+                    background: missingMask3?.[i] ? missingBarColor : color3,
+                    borderRadius: "2px 2px 0 0",
+                    transition: "height 0.3s",
+                    position: "relative",
+                  }}
+                >
+                  {showBarValues && Number(data3[i] || 0) > 0 && !missingMask3?.[i] && (
+                    <span
+                      style={{
+                        position: "absolute",
+                        left: "50%",
+                        bottom: "calc(100% + 2px)",
+                        transform: "translateX(-50%)",
+                        color: C.g500,
+                        fontSize: 9,
+                        fontFamily: fontSans,
+                        whiteSpace: "nowrap",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      {formatBarChartEnergyValue(data3[i] || 0, valueUnit)}
                     </span>
                   )}
                 </div>
@@ -1235,16 +1545,27 @@ function BarChart({ data, data2, labels, color1 = C.navy, color2 = C.gold, heigh
   );
 }
 
-// Seasonal production: month (time) vs average kW — from SAM/PVWatts monthly output
-function SeasonalChart({ monthlyKWh, labels = MONTHS, color = C.gold, height = 200, title, maxKw: maxKwOverride }) {
+// Seasonal production: month (time) vs average kW — from monthly kWh output
+function SeasonalChart({ monthlyKWh, labels = MONTHS, color = C.gold, height = 200, title, maxKw: maxKwOverride, compact: compactOverride, useMwh = false }) {
+  const gradId = useId().replace(/:/g, "");
   const avgKwByMonth = monthlyKWh.map((kwh, i) => (Number(kwh) || 0) / (HOURS_PER_MONTH[i] || 744));
   const maxKw = maxKwOverride ?? Math.max(...avgKwByMonth, 0.1);
   const [hoverIdx, setHoverIdx] = useState(null);
-  const pad = { top: 20, right: 12, bottom: 28, left: 64 };
-  const w = 560;
-  const h = height;
-  const chartW = w - pad.left - pad.right;
+
+  const compact = compactOverride ?? height < 130;
+  const pad = compact
+    ? { top: 10, right: 8, bottom: 22, left: 40 }
+    : { top: 20, right: 12, bottom: 28, left: 64 };
+  const minPlotH = compact ? 56 : 80;
+  const h = Math.max(height, pad.top + pad.bottom + minPlotH);
   const chartH = h - pad.top - pad.bottom;
+  const w = compact ? 500 : 560;
+  const chartW = w - pad.left - pad.right;
+  const yTicks = compact ? [0, 1] : [0, 0.5, 1];
+  const yLabelX = compact ? pad.left - 26 : pad.left - 48;
+  const tickFontSize = compact ? 8 : 9;
+  const xFontSize = compact ? 8 : 9;
+
   const points = avgKwByMonth.map((kw, i) => {
     const x = pad.left + (i + 0.5) * (chartW / 12);
     const y = pad.top + chartH - (kw / maxKw) * chartH;
@@ -1252,6 +1573,7 @@ function SeasonalChart({ monthlyKWh, labels = MONTHS, color = C.gold, height = 2
   });
   const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
   const areaD = pathD + ` L ${points[points.length - 1].x} ${pad.top + chartH} L ${points[0].x} ${pad.top + chartH} Z`;
+
   return (
     <div style={{ position: "relative" }}>
       {hoverIdx != null && (
@@ -1262,38 +1584,32 @@ function SeasonalChart({ monthlyKWh, labels = MONTHS, color = C.gold, height = 2
           boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
         }}>
           <div style={{ fontWeight: 700 }}>{labels[hoverIdx]}</div>
-          <div>{Math.round(Number(monthlyKWh[hoverIdx]) || 0).toLocaleString()} kWh</div>
+          <div>{formatEnergyWithUnit(monthlyKWh[hoverIdx], useMwh)}</div>
           <div>{avgKwByMonth[hoverIdx].toFixed(2)} avg kW</div>
         </div>
       )}
       {title && <div style={{ color: C.g700, fontSize: 12, fontWeight: 600, fontFamily: fontSans, marginBottom: 8 }}>{title}</div>}
       <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: "auto", display: "block" }} preserveAspectRatio="xMidYMid meet" onMouseLeave={() => setHoverIdx(null)}>
         <defs>
-          <linearGradient id="seasonalGrad" x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id={`seasonalGrad-${gradId}`} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={color} stopOpacity={0.35} />
             <stop offset="100%" stopColor={color} stopOpacity={0.05} />
           </linearGradient>
         </defs>
-        {/* Grid */}
         {[0.25, 0.5, 0.75, 1].map((f) => (
           <line key={f} x1={pad.left} y1={pad.top + chartH - f * chartH} x2={pad.left + chartW} y2={pad.top + chartH - f * chartH} stroke={C.g200} strokeWidth={0.5} strokeDasharray="4,2" />
         ))}
         {[2, 5, 8, 11].map((i) => (
           <line key={i} x1={pad.left + (i + 0.5) * (chartW / 12)} y1={pad.top} x2={pad.left + (i + 0.5) * (chartW / 12)} y2={pad.top + chartH} stroke={C.g200} strokeWidth={0.5} strokeDasharray="4,2" />
         ))}
-        {/* Y-axis label */}
-        <text x={pad.left - 48} y={pad.top + chartH / 2} textAnchor="middle" fill={C.g500} fontSize={7} fontFamily={fontSans} transform={`rotate(-90 ${pad.left - 48} ${pad.top + chartH / 2})`}>Avg kW</text>
-        {/* Y ticks */}
-        {[0, 0.5, 1].map((f) => (
-          <text key={f} x={pad.left - 12} y={pad.top + chartH - f * chartH + 3} textAnchor="end" fill={C.g500} fontSize={9} fontFamily={fontSans}>{(maxKw * f).toFixed(1)}</text>
+        <text x={yLabelX} y={pad.top + chartH / 2} textAnchor="middle" fill={C.g500} fontSize={compact ? 6 : 7} fontFamily={fontSans} transform={`rotate(-90 ${yLabelX} ${pad.top + chartH / 2})`}>Avg kW</text>
+        {yTicks.map((f) => (
+          <text key={f} x={pad.left - 8} y={pad.top + chartH - f * chartH + 3} textAnchor="end" fill={C.g500} fontSize={tickFontSize} fontFamily={fontSans}>{(maxKw * f).toFixed(1)}</text>
         ))}
-        {/* Area fill */}
-        <path d={areaD} fill="url(#seasonalGrad)" />
-        {/* Line */}
-        <path d={pathD} fill="none" stroke={color} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />
-        {/* Points */}
+        <path d={areaD} fill={`url(#seasonalGrad-${gradId})`} />
+        <path d={pathD} fill="none" stroke={color} strokeWidth={compact ? 2 : 2.5} strokeLinecap="round" strokeLinejoin="round" />
         {points.map((p, i) => (
-          <circle key={i} cx={p.x} cy={p.y} r={3} fill={color} stroke={C.white} strokeWidth={1} />
+          <circle key={i} cx={p.x} cy={p.y} r={compact ? 2.5 : 3} fill={color} stroke={C.white} strokeWidth={1} />
         ))}
         {points.map((p, i) => (
           <rect
@@ -1306,12 +1622,11 @@ function SeasonalChart({ monthlyKWh, labels = MONTHS, color = C.gold, height = 2
             onMouseEnter={() => setHoverIdx(i)}
           />
         ))}
-        {/* X-axis labels */}
         {labels.map((label, i) => (
-          <text key={i} x={pad.left + (i + 0.5) * (chartW / 12)} y={h - 6} textAnchor="middle" fill={C.g500} fontSize={9} fontFamily={fontSans}>{label}</text>
+          <text key={i} x={pad.left + (i + 0.5) * (chartW / 12)} y={h - 6} textAnchor="middle" fill={C.g500} fontSize={xFontSize} fontFamily={fontSans}>{label}</text>
         ))}
       </svg>
-      <div style={{ display: "flex", justifyContent: "center", marginTop: 4, fontSize: 11, color: C.g500, fontFamily: fontSans }}>
+      <div style={{ display: "flex", justifyContent: "center", marginTop: 4, fontSize: compact ? 10 : 11, color: C.g500, fontFamily: fontSans }}>
         <span>Time (month)</span>
       </div>
     </div>
@@ -1385,6 +1700,10 @@ export default function JantaProposal({
   const [productionOnlyMode, setProductionOnlyMode] = useState(false);
   /** Compare production to monthly usage kWh without utility $ / escalation (charts + usage still required). */
   const [usageComparisonMode, setUsageComparisonMode] = useState(false);
+  /** Dollar savings + usage offset %; no break-even, ROI, or 25-year projection table. */
+  const [savingsOnlyMode, setSavingsOnlyMode] = useState(false);
+  /** Pitch mode: $/W is the headline price; totals shown smaller. Incentive savings in $/W. */
+  const [salesShowcaseMode, setSalesShowcaseMode] = useState(false);
   const [multiMeterMode, setMultiMeterMode] = useState(false);
   const [meters, setMeters] = useState([createMeter(0)]);
   const [activeMeterIdx, setActiveMeterIdx] = useState(0);
@@ -1422,13 +1741,12 @@ export default function JantaProposal({
 
   // ── Region & System ──
   const [region, setRegion] = useState("texas");
-  /** Empty = auto (~60% offset); otherwise kW string, snapped to 5.4 kW steps for math. */
+  /** Empty = auto (~60% offset); otherwise kW string, snapped to 5.6 kW steps for math. */
   const [systemSizeKw, setSystemSizeKw] = useState("");
   const [pricingPerKW, setPricingPerKW] = useState(String(DEFAULT_PRICING_PER_KW));
-  const [batteryName, setBatteryName] = useState("");
-  const [batteryCost, setBatteryCost] = useState("");
-  const [generatorName, setGeneratorName] = useState("");
-  const [generatorCost, setGeneratorCost] = useState("");
+  const [pricingUseRange, setPricingUseRange] = useState(false);
+  const [pricingPerKWHigh, setPricingPerKWHigh] = useState("");
+  const [optionalEquipment, setOptionalEquipment] = useState([]);
   /** When false, battery + generator rows are collapsed; use “Add Battery or Generator” to expand. */
   const [optionalEquipmentOpen, setOptionalEquipmentOpen] = useState(false);
 
@@ -1487,6 +1805,7 @@ export default function JantaProposal({
   const proposalScreenDark = darkThemeActive && step === 5;
   const chartProdColor = darkThemeActive ? "#F0C36A" : C.gold;
   const chartUsageColor = darkThemeActive ? "#F8F2E8" : C.navy;
+  const chartTradColor = darkThemeActive ? "#6B7789" : C.g700;
   Object.assign(C, darkThemeActive ? DARK_C : LIGHT_C);
 
 
@@ -1500,6 +1819,10 @@ export default function JantaProposal({
   const proposalStateRef = useRef({});
   const proposalHydratedRef = useRef(false);
   const autoDownloadStartedRef = useRef(false);
+  const onAutosaveRef = useRef(onAutosaveProposal);
+  const savedProposalIdRef = useRef(savedProposalId);
+  onAutosaveRef.current = onAutosaveProposal;
+  savedProposalIdRef.current = savedProposalId;
 
   proposalStateRef.current = {
     step,
@@ -1521,6 +1844,8 @@ export default function JantaProposal({
     rateEsc,
     productionOnlyMode,
     usageComparisonMode,
+    savingsOnlyMode,
+    salesShowcaseMode,
     multiMeterMode,
     meters,
     activeMeterIdx,
@@ -1529,10 +1854,9 @@ export default function JantaProposal({
     region,
     systemSizeKw,
     pricingPerKW,
-    batteryName,
-    batteryCost,
-    generatorName,
-    generatorCost,
+    pricingUseRange,
+    pricingPerKWHigh,
+    optionalEquipment,
     optionalEquipmentOpen,
     useNrelApi,
     nrelApiKey,
@@ -1593,6 +1917,8 @@ export default function JantaProposal({
       setRateEsc,
       setProductionOnlyMode,
       setUsageComparisonMode,
+      setSavingsOnlyMode,
+      setSalesShowcaseMode,
       setMultiMeterMode,
       setMeters,
       setActiveMeterIdx,
@@ -1601,10 +1927,9 @@ export default function JantaProposal({
       setRegion,
       setSystemSizeKw,
       setPricingPerKW,
-      setBatteryName,
-      setBatteryCost,
-      setGeneratorName,
-      setGeneratorCost,
+      setPricingUseRange,
+      setPricingPerKWHigh,
+      setOptionalEquipment,
       setOptionalEquipmentOpen,
       setUseNrelApi,
       setNrelApiKey,
@@ -1667,21 +1992,21 @@ export default function JantaProposal({
     if (!savedProposalId || !proposalHydratedRef.current || typeof onAutosaveProposal !== "function") {
       return undefined;
     }
-    const AUTOSAVE_MS = 600_000;
+    const AUTOSAVE_MS = 60_000;
     const runAutosave = async () => {
+      if (!savedProposalIdRef.current || !proposalHydratedRef.current) return;
       const snapshot = buildProposalSnapshot(proposalStateRef.current);
       try {
-        await onAutosaveProposal({ snapshot });
+        await onAutosaveRef.current({ snapshot });
       } catch (_err) {
         // silent background autosave
       }
     };
     const timer = setInterval(runAutosave, AUTOSAVE_MS);
     const onUnload = () => {
+      if (!savedProposalIdRef.current) return;
       const snapshot = buildProposalSnapshot(proposalStateRef.current);
-      if (typeof onAutosaveProposal === "function") {
-        onAutosaveProposal({ snapshot }).catch(() => {});
-      }
+      onAutosaveRef.current({ snapshot }).catch(() => {});
     };
     window.addEventListener("beforeunload", onUnload);
     return () => {
@@ -1692,11 +2017,11 @@ export default function JantaProposal({
 
   useEffect(() => {
     return () => {
-      if (!savedProposalId || typeof onAutosaveProposal !== "function") return;
+      if (!savedProposalIdRef.current || typeof onAutosaveRef.current !== "function") return;
       const snapshot = buildProposalSnapshot(proposalStateRef.current);
-      onAutosaveProposal({ snapshot }).catch(() => {});
+      onAutosaveRef.current({ snapshot }).catch(() => {});
     };
-  }, [savedProposalId, onAutosaveProposal]);
+  }, []);
 
   useEffect(() => {
     if (!autoDownloadPdf || !proposalHydratedRef.current || autoDownloadStartedRef.current) return undefined;
@@ -1788,9 +2113,9 @@ export default function JantaProposal({
   }, [finSavedLandValueAuto, siteLat, siteLon, custAddress, siteAddress, selState, region]);
 
   useEffect(() => {
-    const pricePerKw = parseFloat(pricingPerKW) > 0 ? parseFloat(pricingPerKW) : DEFAULT_PRICING_PER_KW;
-    setFinPricePerMw(String(Math.round(pricePerKw * 1000)));
-  }, [pricingPerKW]);
+    const { midpoint } = resolveSolarPricePerKw({ pricingPerKW, pricingPerKWHigh, pricingUseRange });
+    setFinPricePerMw(String(Math.round(midpoint * 1000)));
+  }, [pricingPerKW, pricingPerKWHigh, pricingUseRange]);
 
   useEffect(() => {
     const handleResize = () => setViewportWidth(window.innerWidth);
@@ -1977,15 +2302,7 @@ export default function JantaProposal({
       await new Promise((resolve) => requestAnimationFrame(resolve));
       await new Promise((resolve) => requestAnimationFrame(resolve));
 
-      const sigImg = el.querySelector('img[alt="Adam Boudissa signature"]');
-      if (sigImg) {
-        try {
-          await sigImg.decode();
-        } catch (_) {
-          /* ignore */
-        }
-      }
-
+      await waitForImages(el);
       revertRaster = await rasterizeImagesForHtml2Pdf(el);
 
       const mod = await import("html2pdf.js");
@@ -2015,11 +2332,24 @@ export default function JantaProposal({
 
   function onProductionOnlyToggle(checked) {
     setProductionOnlyMode(checked);
-    if (checked) setUsageComparisonMode(false);
+    if (checked) {
+      setUsageComparisonMode(false);
+      setSavingsOnlyMode(false);
+    }
   }
   function onUsageComparisonToggle(checked) {
     setUsageComparisonMode(checked);
-    if (checked) setProductionOnlyMode(false);
+    if (checked) {
+      setProductionOnlyMode(false);
+      setSavingsOnlyMode(false);
+    }
+  }
+  function onSavingsOnlyToggle(checked) {
+    setSavingsOnlyMode(checked);
+    if (checked) {
+      setProductionOnlyMode(false);
+      setUsageComparisonMode(false);
+    }
   }
 
   function onMultiMeterToggle(checked) {
@@ -2061,8 +2391,7 @@ export default function JantaProposal({
     setMeters((prev) =>
       prev.map((m, i) => {
         if (i !== idx) return m;
-        const prevAuto = autoMeterNameFromNumber(m.meterNumber);
-        const nameWasAuto = !m.name || m.name === prevAuto;
+        const nameWasAuto = isAutoMeterName(m.name, m.meterNumber);
         const autoName = autoMeterNameFromNumber(meterNumber);
         return {
           ...m,
@@ -2196,6 +2525,7 @@ export default function JantaProposal({
   const cfInput = parseFloat(String(capacityFactorPct).replace(/%/g, "").trim());
   const hasManualCf = String(capacityFactorPct).trim() !== "" && Number.isFinite(cfInput);
   const effectiveCF = hasManualCf ? Math.min(99.9, Math.max(0, cfInput)) / 100 : baseCF;
+  const traditionalCF = effectiveCF / JANTA_VS_TRADITIONAL_CF_RATIO;
   const effectiveAnnualPerKW = hasManualCf ? effectiveCF * 8760 : baseAnnualPerKW;
   const monthScale = hasManualCf && baseAnnualPerKW > 0 ? effectiveAnnualPerKW / baseAnnualPerKW : 1;
   const effectiveMonthlyPerKW = hasManualCf
@@ -2206,7 +2536,7 @@ export default function JantaProposal({
     : samData
       ? "Source: NREL PVWatts (SAM)"
       : `Source: Auto — ${reg.label} curve`;
-  /** Step count closest to 60% offset (may be slightly above or below 60% once snapped to 5.4 kW). */
+  /** Step count closest to 60% offset (may be slightly above or below 60% once snapped to 5.6 kW). */
   const optimalSystemStep = useMemo(() => {
     if (!annualKWh || !effectiveAnnualPerKW || effectiveAnnualPerKW <= 0) return 1;
     const targetKw = (0.6 * annualKWh) / effectiveAnnualPerKW;
@@ -2222,16 +2552,136 @@ export default function JantaProposal({
     return optimalSystemKw;
   }, [systemSizeKw, optimalSystemKw]);
   const systemSizeAtMinStep = effectiveSize <= SYSTEM_SIZE_STEP_KW + 0.001;
-  const costPerKW = parseFloat(pricingPerKW) > 0 ? parseFloat(pricingPerKW) : DEFAULT_PRICING_PER_KW;
-  const batteryAdd = Math.max(0, parseFloat(String(batteryCost).replace(/,/g, "")) || 0);
-  const generatorAdd = Math.max(0, parseFloat(String(generatorCost).replace(/,/g, "")) || 0);
-  const hasBatteryAddition = batteryAdd > 0 || batteryName.trim() !== "";
-  const hasGeneratorAddition = generatorAdd > 0 || generatorName.trim() !== "";
-  const hasOptionalAdditions = hasBatteryAddition || hasGeneratorAddition;
+  const solarPricing = resolveSolarPricePerKw({ pricingPerKW, pricingPerKWHigh, pricingUseRange });
+  const costPerKW = solarPricing.midpoint;
+  const costPerKWLow = solarPricing.low;
+  const costPerKWHigh = solarPricing.high;
+  const solarPriceRange = solarPricing.useRange;
+  const activeEquipment = activeEquipmentItems(optionalEquipment);
+  const batteryEquipment = activeEquipment.filter((item) => item.kind === "battery");
+  const generatorEquipment = activeEquipment.filter((item) => item.kind === "generator");
+  const batteryAdd = batteryEquipment.reduce((sum, item) => sum + equipmentLineTotal(item), 0);
+  const generatorAdd = generatorEquipment.reduce((sum, item) => sum + equipmentLineTotal(item), 0);
+  const hasOptionalAdditions = activeEquipment.length > 0;
+
+  const openEquipmentEditor = () => {
+    setOptionalEquipment((prev) => ensureEquipmentEditorRows(prev.length ? prev : []));
+    setOptionalEquipmentOpen(true);
+  };
+
+  const saveEquipmentEditor = () => {
+    setOptionalEquipment((prev) => collapseEquipmentForStorage(prev));
+    setOptionalEquipmentOpen(false);
+  };
+
+  const clearAllEquipment = () => {
+    setOptionalEquipment(ensureEquipmentEditorRows([]));
+  };
+
+  const removeOrClearEquipmentRow = (item) => {
+    const ofKind = equipmentRowsOfKind(optionalEquipment, item.kind);
+    if (ofKind.length > 1) {
+      setOptionalEquipment((prev) => prev.filter((row) => row.id !== item.id));
+      return;
+    }
+    setOptionalEquipment((prev) =>
+      prev.map((row) => (row.id === item.id ? { ...row, name: "", unitCost: "", quantity: 1 } : row))
+    );
+  };
+
+  const equipmentRowClearStyle = (enabled) => ({
+    flexShrink: 0,
+    alignSelf: "center",
+    width: 28,
+    height: 28,
+    border: "none",
+    background: "transparent",
+    color: enabled ? "#2f3e4d" : C.g300,
+    fontSize: 20,
+    fontWeight: 600,
+    lineHeight: 1,
+    padding: 0,
+    cursor: enabled ? "pointer" : "not-allowed",
+    fontFamily: fontSans,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    opacity: enabled ? 1 : 0.4,
+  });
+
+  const renderEquipmentEditorRow = (item) => {
+    const presets = item.kind === "generator" ? GENERATOR_PRESETS : BATTERY_PRESETS;
+    const listId = item.kind === "generator" ? "janta-generator-presets" : "janta-battery-presets";
+    const rowLabel = item.kind === "generator" ? "Generator" : "Battery storage";
+    const ofKind = equipmentRowsOfKind(optionalEquipment, item.kind);
+    const rowFilled = equipmentHasContent(item);
+    const clearEnabled = rowFilled || ofKind.length > 1;
+    return (
+      <div
+        key={item.id}
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) 52px auto",
+          gap: 8,
+          alignItems: "center",
+          minWidth: 0,
+        }}
+      >
+        <Field
+          label={rowLabel}
+          value={item.name}
+          onChange={(v) => {
+            const patch = { name: v };
+            if (!v.trim()) {
+              patch.unitCost = "";
+            } else {
+              const preset = presetCostForEquipment(v, presets);
+              if (preset != null) patch.unitCost = preset;
+            }
+            setOptionalEquipment((prev) => patchEquipmentItem(prev, item.id, patch));
+          }}
+          placeholder="Type or select…"
+          shrink
+          list={listId}
+        />
+        <Field
+          label="Amount"
+          value={item.unitCost}
+          onChange={(v) => setOptionalEquipment((prev) => patchEquipmentItem(prev, item.id, { unitCost: v }))}
+          type="number"
+          unit="$"
+          placeholder="0"
+          shrink
+        />
+        <Field
+          label="Qty"
+          value={String(item.quantity)}
+          onChange={(v) => {
+            const quantity = equipmentQuantity(v);
+            setOptionalEquipment((prev) => patchEquipmentItem(prev, item.id, { quantity }));
+          }}
+          type="number"
+          min={1}
+          placeholder="1"
+          shrink
+        />
+        <button
+          type="button"
+          onClick={() => removeOrClearEquipmentRow(item)}
+          disabled={!clearEnabled}
+          aria-label={ofKind.length > 1 ? `Remove ${rowLabel.toLowerCase()}` : `Clear ${rowLabel.toLowerCase()}`}
+          title={ofKind.length > 1 ? `Remove ${rowLabel.toLowerCase()}` : `Clear ${rowLabel.toLowerCase()}`}
+          style={equipmentRowClearStyle(clearEnabled)}
+        >
+          ×
+        </button>
+      </div>
+    );
+  };
 
   const prodCtx = useMemo(
-    () => ({ effectiveMonthlyPerKW, effectiveAnnualPerKW }),
-    [effectiveMonthlyPerKW, effectiveAnnualPerKW]
+    () => ({ effectiveMonthlyPerKW, effectiveAnnualPerKW, effectiveCF, traditionalCF }),
+    [effectiveMonthlyPerKW, effectiveAnnualPerKW, effectiveCF, traditionalCF]
   );
   const meterBundles = useMemo(() => {
     if (!multiMeterMode) return [];
@@ -2270,9 +2720,96 @@ export default function JantaProposal({
     ? (effectiveSizeProject / requiredKwForFullOffsetProject) * 100
     : 0;
 
-  const solarGross = effectiveSizeProject * costPerKW;
-  const grossCost = solarGross + batteryAdd + generatorAdd;
+  const solarGrossLow = solarGrossForKw(effectiveSizeProject, costPerKWLow);
+  const solarGrossHigh = solarGrossForKw(effectiveSizeProject, costPerKWHigh);
+  const solarGross = (solarGrossLow + solarGrossHigh) / 2;
+  const grossCostLow = solarGrossLow + batteryAdd + generatorAdd;
+  const grossCostHigh = solarGrossHigh + batteryAdd + generatorAdd;
+  const grossCost = (grossCostLow + grossCostHigh) / 2;
   const monthlyProd = monthlyProdProject;
+  const monthlyTradProd = useMemo(
+    () => monthlyTraditionalProd(monthlyProd, effectiveCF, traditionalCF),
+    [monthlyProd, effectiveCF, traditionalCF]
+  );
+  const useMwhDisplay = useMemo(
+    () =>
+      shouldUseMwhDisplay([
+        annualProdProject,
+        annualKWhProject,
+        ...monthlyProdProject,
+        ...monthlyTradProd,
+        ...monthlyKWhNumericProject,
+      ]),
+    [annualProdProject, annualKWhProject, monthlyProdProject, monthlyTradProd, monthlyKWhNumericProject]
+  );
+  const useMwDisplay = useMemo(
+    () =>
+      shouldUseMwDisplay([
+        effectiveSizeProject,
+        ...(multiMeterMode ? meterBundles.map((b) => b.effectiveSize) : [effectiveSize]),
+      ]),
+    [effectiveSizeProject, multiMeterMode, meterBundles, effectiveSize]
+  );
+  const step1ProdChart = useMemo(
+    () =>
+      buildProductionChartConfig({
+        salesShowcase: salesShowcaseMode,
+        hasUsage: hasMonthlyUsageDataProject,
+        monthlyProd: monthlyProdProject,
+        monthlyTradProd,
+        monthlyKWhNumeric: monthlyKWhNumericProject,
+        usageMissingMask: usageMissingMaskProject,
+        forPdf: false,
+        chartProdColor,
+        chartUsageColor,
+        chartTradColor,
+        screenDark: darkThemeActive,
+        useMwh: useMwhDisplay,
+      }),
+    [
+      salesShowcaseMode,
+      hasMonthlyUsageDataProject,
+      monthlyProdProject,
+      monthlyTradProd,
+      monthlyKWhNumericProject,
+      usageMissingMaskProject,
+      chartProdColor,
+      chartUsageColor,
+      chartTradColor,
+      darkThemeActive,
+      useMwhDisplay,
+    ]
+  );
+  const proposalProdChart = useMemo(
+    () =>
+      buildProductionChartConfig({
+        salesShowcase: salesShowcaseMode,
+        hasUsage: hasMonthlyUsageDataProject,
+        monthlyProd: monthlyProdProject,
+        monthlyTradProd,
+        monthlyKWhNumeric: monthlyKWhNumericProject,
+        usageMissingMask: usageMissingMaskProject,
+        forPdf: true,
+        chartProdColor,
+        chartUsageColor,
+        chartTradColor,
+        screenDark: proposalScreenDark,
+        useMwh: useMwhDisplay,
+      }),
+    [
+      salesShowcaseMode,
+      hasMonthlyUsageDataProject,
+      monthlyProdProject,
+      monthlyTradProd,
+      monthlyKWhNumericProject,
+      usageMissingMaskProject,
+      chartProdColor,
+      chartUsageColor,
+      chartTradColor,
+      proposalScreenDark,
+      useMwhDisplay,
+    ]
+  );
   const annualProd = annualProdProject;
   const requiredKwForFullOffset = requiredKwForFullOffsetProject;
   const offsetPct = offsetPctProject;
@@ -2280,6 +2817,7 @@ export default function JantaProposal({
   const hasMonthlyUsageData = hasMonthlyUsageDataProject;
   const noUtilityEconomics = productionOnlyMode || usageComparisonMode;
   const includeUtilityBillEconomics = !noUtilityEconomics;
+  const includeRoiMetrics = includeUtilityBillEconomics && !savingsOnlyMode;
   const parsedRate = parseFloat(ratePerKWh);
   const rate = noUtilityEconomics ? 0 : (Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : 0.12);
   const annualSavings = noUtilityEconomics
@@ -2290,13 +2828,7 @@ export default function JantaProposal({
 
   // Credits - auto-populated from state
   const stInc = STATE_INCENTIVES[selState] || STATE_INCENTIVES.TX;
-  const itcAmt = grossCost * (itcPct / 100);
-  const ecAmt = ecOn ? grossCost * 0.10 : 0;
-  // State tax credit
-  const stateTaxAmt = stInc.tax > 0 ? Math.min(grossCost * stInc.tax, stInc.taxCap || Infinity) : 0;
-  // SREC value (upfront lump sum for residential IL Shines style, or annual for others)
   const srecAmt = stInc.srec ? (annualProd / 1000) * stInc.srec.perMWh * stInc.srec.years : 0;
-  // Utility rebates
   let utilRebateAmt = 0;
   let utilRebateLabel = "";
   stInc.rebates.forEach(r => {
@@ -2305,18 +2837,76 @@ export default function JantaProposal({
     else if (r.flat) { utilRebateAmt += r.flat; utilRebateLabel = r.name; }
     else { utilRebateLabel = r.name; }
   });
-  const activeCreditItems = [
-    itcPct > 0 && { key: "itc", label: `Federal ITC (${itcPct}%)`, detailLabel: `Federal ITC — Section 48E (${itcPct}%)`, amount: Math.round(itcAmt) },
-    stateTaxAmt > 0 && { key: "stateTax", label: `${stInc.name} Tax Credit (${(stInc.tax * 100).toFixed(0)}%)`, detailLabel: `${stInc.name} State Tax Credit (${(stInc.tax * 100).toFixed(0)}%)`, amount: Math.round(stateTaxAmt) },
-    srecAmt > 0 && { key: "srec", label: `${stInc.srec.label || "SREC"} (${stInc.srec.years}yr)`, detailLabel: `${stInc.srec.label || "SREC"} ($${stInc.srec.perMWh}/MWh × ${stInc.srec.years}yr)`, amount: Math.round(srecAmt) },
-    utilRebateAmt > 0 && { key: "utility", label: utilRebateLabel || "Utility Rebate", detailLabel: utilRebateLabel || "Utility Rebate", amount: Math.round(utilRebateAmt) },
-    ecOn && { key: "energyCommunity", label: "Energy Community", detailLabel: "Energy Community Bonus (10%)", amount: Math.round(ecAmt) },
-    ...extraCredits.map((c) => ({ key: `extra:${c.id}`, label: c.name || "Other Credit", detailLabel: c.name || "Other Credit", amount: Math.round(c.amount || 0) })),
-  ].filter(Boolean).filter((item) => !removedCreditKeys[item.key]);
-
-  const totalCredits = activeCreditItems.reduce((sum, item) => sum + (item.amount || 0), 0);
-  const netCost = grossCost - totalCredits;
+  const buildCreditItemsForGross = (gross) => {
+    const itcAmt = gross * (itcPct / 100);
+    const ecAmt = gross * 0.10;
+    const stateTaxAmt = stInc.tax > 0 ? Math.min(gross * stInc.tax, stInc.taxCap || Infinity) : 0;
+    return [
+      itcPct > 0 && { key: "itc", label: `Federal ITC (${itcPct}%)`, detailLabel: `Federal ITC — Section 48E (${itcPct}%)`, amount: Math.round(itcAmt) },
+      stateTaxAmt > 0 && { key: "stateTax", label: `${stInc.name} Tax Credit (${(stInc.tax * 100).toFixed(0)}%)`, detailLabel: `${stInc.name} State Tax Credit (${(stInc.tax * 100).toFixed(0)}%)`, amount: Math.round(stateTaxAmt) },
+      srecAmt > 0 && { key: "srec", label: `${stInc.srec.label || "SREC"} (${stInc.srec.years}yr)`, detailLabel: `${stInc.srec.label || "SREC"} ($${stInc.srec.perMWh}/MWh × ${stInc.srec.years}yr)`, amount: Math.round(srecAmt) },
+      utilRebateAmt > 0 && { key: "utility", label: utilRebateLabel || "Utility Rebate", detailLabel: utilRebateLabel || "Utility Rebate", amount: Math.round(utilRebateAmt) },
+      ecOn && { key: "energyCommunity", label: "Energy Community", detailLabel: "Energy Community Bonus (10%)", amount: Math.round(ecAmt) },
+      ...extraCredits.map((c) => ({ key: `extra:${c.id}`, label: c.name || "Other Credit", detailLabel: c.name || "Other Credit", amount: Math.round(c.amount || 0) })),
+    ].filter(Boolean).filter((item) => !removedCreditKeys[item.key]);
+  };
+  const creditItemsLow = buildCreditItemsForGross(grossCostLow);
+  const creditItemsHigh = buildCreditItemsForGross(grossCostHigh);
+  const activeCreditItems = creditItemsLow.map((lowItem) => {
+    const highItem = creditItemsHigh.find((h) => h.key === lowItem.key);
+    const amountHigh = highItem?.amount ?? lowItem.amount;
+    const displayAmount =
+      solarPriceRange && Math.round(lowItem.amount) !== Math.round(amountHigh)
+        ? formatUsdRange(lowItem.amount, amountHigh)
+        : formatUsd(lowItem.amount);
+    return { ...lowItem, amountHigh, displayAmount };
+  });
+  const totalCreditsLow = creditItemsLow.reduce((sum, item) => sum + (item.amount || 0), 0);
+  const totalCreditsHigh = creditItemsHigh.reduce((sum, item) => sum + (item.amount || 0), 0);
+  const totalCredits = (totalCreditsLow + totalCreditsHigh) / 2;
+  const netCostLow = grossCostLow - totalCreditsLow;
+  const netCostHigh = grossCostHigh - totalCreditsHigh;
+  const netCost = (netCostLow + netCostHigh) / 2;
+  // ROI / break-even / 25yr: solar PV only — batteries & generators excluded from net cost; incentives on solar gross
+  const utilityCreditItemsLow = buildCreditItemsForGross(solarGrossLow);
+  const utilityCreditItemsHigh = buildCreditItemsForGross(solarGrossHigh);
+  const utilityTotalCreditsLow = utilityCreditItemsLow.reduce((sum, item) => sum + (item.amount || 0), 0);
+  const utilityTotalCreditsHigh = utilityCreditItemsHigh.reduce((sum, item) => sum + (item.amount || 0), 0);
+  const utilityNetCostLow = solarGrossLow - utilityTotalCreditsLow;
+  const utilityNetCostHigh = solarGrossHigh - utilityTotalCreditsHigh;
+  const utilityNetCost = (utilityNetCostLow + utilityNetCostHigh) / 2;
   const autoFinIncentivePct = grossCost > 0 ? (totalCredits / grossCost) * 100 : 0;
+  const stateTaxCreditLow = creditItemsLow.find((i) => i.key === "stateTax")?.amount ?? 0;
+  const stateTaxCreditHigh = creditItemsHigh.find((i) => i.key === "stateTax")?.amount ?? 0;
+  const stateTaxCreditDisplay =
+    solarPriceRange && Math.round(stateTaxCreditLow) !== Math.round(stateTaxCreditHigh)
+      ? formatUsdRange(stateTaxCreditLow, stateTaxCreditHigh)
+      : formatUsd(stateTaxCreditLow);
+  const grossCostDisplay = solarPriceRange ? formatUsdRange(grossCostLow, grossCostHigh) : formatUsd(grossCost);
+  const netCostDisplay = solarPriceRange ? formatUsdRange(netCostLow, netCostHigh) : formatUsd(netCost);
+  const kw = effectiveSizeProject;
+  const projectGrossPerWDisplay = solarPriceRange
+    ? formatUsdPerWRangeFromTotals(grossCostLow, grossCostHigh, kw)
+    : formatUsdPerWFromTotal(grossCost, kw);
+  const projectNetPerWDisplay = solarPriceRange
+    ? formatUsdPerWRangeFromTotals(netCostLow, netCostHigh, kw)
+    : formatUsdPerWFromTotal(netCost, kw);
+  const solarGrossDisplay = solarPriceRange ? formatUsdRange(solarGrossLow, solarGrossHigh) : formatUsd(solarGrossLow);
+  const solarNetDisplay = solarPriceRange ? formatUsdRange(utilityNetCostLow, utilityNetCostHigh) : formatUsd(utilityNetCost);
+  const costPerKWDisplay = solarPriceRange ? formatUsdRange(costPerKWLow, costPerKWHigh) : formatUsd(costPerKWLow);
+  const grossPerWDisplay = solarPriceRange
+    ? formatUsdPerWRangeFromTotals(solarGrossLow, solarGrossHigh, kw)
+    : formatUsdPerWFromTotal(solarGrossLow, kw);
+  const netPerWDisplay = solarPriceRange
+    ? formatUsdPerWRangeFromTotals(utilityNetCostLow, utilityNetCostHigh, kw)
+    : formatUsdPerWFromTotal(utilityNetCost, kw);
+  const incentivePerWDisplay = solarPriceRange
+    ? formatUsdPerWRangeFromTotals(totalCreditsLow, totalCreditsHigh, kw)
+    : formatUsdPerWFromTotal(totalCredits, kw);
+  const totalCreditsDisplay =
+    solarPriceRange && Math.round(totalCreditsLow) !== Math.round(totalCreditsHigh)
+      ? formatUsdRange(totalCreditsLow, totalCreditsHigh)
+      : formatUsd(totalCreditsLow);
 
   const itcCreditRemoved = !!removedCreditKeys.itc;
   const ecCreditRemoved = !!removedCreditKeys.energyCommunity;
@@ -2366,10 +2956,10 @@ export default function JantaProposal({
     setRemovedCreditKeys({});
   }
 
-  // 25yr projection
+  // 25yr savings projection ($); full table + net column only in ROI mode
   const esc = noUtilityEconomics ? 0 : (parseFloat(rateEsc) || 3);
   const projection = useMemo(() => {
-    if (noUtilityEconomics) return [];
+    if (!includeUtilityBillEconomics) return [];
     const rows = [];
     let cum = 0;
     for (let y = 1; y <= 25; y++) {
@@ -2378,19 +2968,27 @@ export default function JantaProposal({
       const usageCap = multiMeterMode ? annualKWhProject : annualKWh;
       const sav = Math.min(prod, usageCap) * r;
       cum += sav;
-      rows.push({ y, prod: Math.round(prod), sav: Math.round(sav), cum: Math.round(cum), net: Math.round(cum - netCost) });
+      rows.push({
+        y,
+        prod: Math.round(prod),
+        sav: Math.round(sav),
+        cum: Math.round(cum),
+        net: includeRoiMetrics ? Math.round(cum - utilityNetCost) : 0,
+      });
     }
     return rows;
-  }, [annualProd, annualKWhProject, rate, esc, netCost, noUtilityEconomics]);
+  }, [annualProd, annualKWhProject, rate, esc, utilityNetCost, includeUtilityBillEconomics, includeRoiMetrics, multiMeterMode, annualKWh]);
 
-  const breakEven = noUtilityEconomics ? "N/A" : (projection.find(r => r.net >= 0)?.y || "25+");
-  const savings25 = noUtilityEconomics ? 0 : (projection[24]?.cum || 0);
-  const roi = noUtilityEconomics ? 0 : (netCost > 0 ? ((annualSavings / netCost) * 100) : 0);
+  const breakEven = !includeRoiMetrics ? "N/A" : (projection.find(r => r.net >= 0)?.y || "25+");
+  const savings25 = includeUtilityBillEconomics ? (projection[24]?.cum || 0) : 0;
+  const roi = !includeRoiMetrics ? 0 : (utilityNetCost > 0 ? ((annualSavings / utilityNetCost) * 100) : 0);
   const proposalFinancialSectionTitle = productionOnlyMode
     ? "Production Breakdown"
     : usageComparisonMode
       ? "Production & Usage Comparison"
-      : "Financial Breakdown";
+      : savingsOnlyMode
+        ? "Production & Utility Savings"
+        : "Financial Breakdown";
 
   useEffect(() => {
     if (step !== 5) return;
@@ -2459,7 +3057,7 @@ export default function JantaProposal({
         }
       });
     };
-  }, [step, includeFinancialsInProposal, includeCapitalLessSavedLand, includeUtilityBillEconomics, productionOnlyMode, usageComparisonMode, pdfExporting, startPermissionsOnNewPage, multiMeterMode, meters.length, meterBundles.length]);
+  }, [step, includeFinancialsInProposal, includeCapitalLessSavedLand, includeUtilityBillEconomics, includeRoiMetrics, productionOnlyMode, usageComparisonMode, savingsOnlyMode, pdfExporting, startPermissionsOnNewPage, multiMeterMode, meters.length, meterBundles.length]);
   // Excel-based land model:
   // Space Required by Janta (acres) = (X MW * 1000) / 450
   // Space Required by Fixed Tilt (acres) = (X MW * 1000) / 150
@@ -2552,6 +3150,54 @@ export default function JantaProposal({
     const blockGap = pdfMode && compactMode ? 8 : 12;
     const title = pdfMode ? "System Costs" : "System Costs (Preview)";
     const summaryDark = darkThemeActive && (!pdfMode || proposalScreenDark);
+    const showcasePy = 8;
+    const showcaseRowPad = `${showcasePy}px 0`;
+    const showcaseNetColor = darkThemeActive ? "#7EB8DC" : C.blue;
+    const showcaseNetBoxBg = summaryDark ? "#1A3044" : "#E8F2F8";
+    const showcaseNetBoxBorder = summaryDark ? "#3D6280" : "#B8D4E8";
+    const showcasePerW = (perW, color = C.navy) => (
+      <div style={{ textAlign: "right", color, fontWeight: 600, fontSize: 14, lineHeight: 1, fontFamily: fontSans }}>{perW}</div>
+    );
+    const showcaseCostRow = (label, perW, color, borderTop = false, key) => (
+      <div
+        key={key}
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr auto",
+          gap: 8,
+          alignItems: "center",
+          padding: showcaseRowPad,
+          borderTop: borderTop ? `1px solid ${C.g200}` : undefined,
+        }}
+      >
+        <span style={{ color: C.g500, fontSize: 11 }}>{label}</span>
+        {showcasePerW(perW, color)}
+      </div>
+    );
+    const equipmentList =
+      (batteryAdd > 0 || generatorAdd > 0) && (
+        <div style={{ marginTop: blockGap, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: blockPad, ...avoid }}>
+          <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
+            Battery & Generator
+          </div>
+          {[...batteryEquipment, ...generatorEquipment].map((item, i, rows) => (
+            <div
+              key={item.id}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "6px 0",
+                borderBottom: i < rows.length - 1 ? `1px dashed ${C.g200}` : "none",
+                fontSize: 12,
+              }}
+            >
+              <span style={{ color: C.g700 }}>{formatEquipmentLabel(item)}</span>
+              <span style={{ color: C.navy, fontFamily: fontSans, fontWeight: 700 }}>${Math.round(equipmentLineTotal(item)).toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      );
     const inner = (
       <div
         style={{
@@ -2564,83 +3210,123 @@ export default function JantaProposal({
       >
         <h3 style={{ margin: `0 0 ${h3Mb}px 0`, fontSize: h3Size, fontWeight: 700, color: titleColor }}>{title}</h3>
 
-        <div style={{ background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: blockPad, ...avoid }}>
-          <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: pdfMode && compactMode ? 6 : 8 }}>
-            Base System Price
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, fontFamily: fontSans }}>
-            {multiMeterMode && meterBundles.length > 0 ? (
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ color: C.g500 }}>Total system size</span>
-                <span style={{ color: C.navy, fontWeight: 700 }}>{formatKw(effectiveSizeProject)} kW</span>
+        {salesShowcaseMode ? (
+          <>
+            <div style={{ background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: `0 ${blockPad}px`, ...avoid }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: showcaseRowPad,
+                }}
+              >
+                <span style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>Solar PV</span>
+                <span style={{ color: C.navy, fontWeight: 700, fontFamily: fontSans, fontSize: 12 }}>{formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}</span>
               </div>
-            ) : (
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ color: C.g500 }}>System Size</span>
-                <span style={{ color: C.navy, fontWeight: 700 }}>{formatKw(effectiveSizeProject)} kW</span>
+              <div style={{ fontFamily: fontSans }}>
+                {showcaseCostRow("Gross", grossPerWDisplay, C.navy, true)}
+                {activeCreditItems.map((item, i) =>
+                  showcaseCostRow(
+                    item.label,
+                    formatCreditPerW(item.amount, item.amountHigh, kw, solarPriceRange),
+                    C.green,
+                    true,
+                    `${item.key}-${i}`
+                  )
+                )}
+                {showcaseCostRow("Net", netPerWDisplay, showcaseNetColor, true)}
               </div>
-            )}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ color: C.g500 }}>Price per kW</span>
-              <span style={{ color: C.navy, fontWeight: 700 }}>${Math.round(costPerKW).toLocaleString()}</span>
             </div>
-            <div style={{ borderTop: `1px dashed ${C.g200}`, marginTop: 2, paddingTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ color: C.blue, fontWeight: 700 }}>System Total (Solar PV)</span>
-              <span style={{ color: C.blue, fontWeight: 700, fontFamily: fontSans }}>${Math.round(solarGross).toLocaleString()}</span>
-            </div>
-          </div>
-        </div>
 
-        {(batteryAdd > 0 || generatorAdd > 0) && (
-          <div style={{ marginTop: blockGap, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: blockPad, ...avoid }}>
-            <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
-              Battery & Generator
+            {equipmentList}
+
+            <div style={{ marginTop: blockGap, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: pdfMode && compactMode ? 6 : 8, ...avoid }}>
+              <div style={{ background: summaryDark ? "#22180F" : C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Project gross</div>
+                <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: 18, lineHeight: 1.15 }}>
+                  {projectGrossPerWDisplay}
+                </div>
+                <div style={{ color: C.g500, fontSize: 10, fontFamily: fontSans, marginTop: 3 }}>{grossCostDisplay}</div>
+              </div>
+              <div style={{ background: summaryDark ? "#1A2A1F" : "#EEF8F0", border: `1px solid ${summaryDark ? "#2D4A38" : "#C8E6CF"}`, borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ color: summaryDark ? "#8FB89A" : C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>
+                  Incentives
+                </div>
+                <div style={{ color: C.green, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: 18, lineHeight: 1 }}>
+                  {incentivePerWDisplay}
+                </div>
+                <div style={{ color: summaryDark ? "#8FB89A" : C.g500, fontSize: 10, fontFamily: fontSans, marginTop: 2 }}>
+                  {totalCreditsDisplay}
+                </div>
+              </div>
+              <div style={{ background: showcaseNetBoxBg, border: `1px solid ${showcaseNetBoxBorder}`, borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ color: summaryDark ? "#8FB0C8" : C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Project net</div>
+                <div style={{ color: showcaseNetColor, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: 18, lineHeight: 1.15 }}>
+                  {projectNetPerWDisplay}
+                </div>
+                <div style={{ color: summaryDark ? "#8FB0C8" : C.g500, fontSize: 10, fontFamily: fontSans, marginTop: 3 }}>
+                  {netCostDisplay}
+                </div>
+              </div>
             </div>
-            {batteryAdd > 0 && (
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: generatorAdd > 0 ? `1px dashed ${C.g200}` : "none", fontSize: 12 }}>
-                <span style={{ color: C.g700 }}>{batteryName.trim() || "Battery Storage"}</span>
-                <span style={{ color: C.navy, fontFamily: fontSans, fontWeight: 700 }}>${Math.round(batteryAdd).toLocaleString()}</span>
+          </>
+        ) : (
+          <>
+            <div style={{ background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: blockPad, ...avoid }}>
+              <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: pdfMode && compactMode ? 6 : 8 }}>
+                Base System Price
               </div>
-            )}
-            {generatorAdd > 0 && (
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", fontSize: 12 }}>
-                <span style={{ color: C.g700 }}>{generatorName.trim() || "Generator"}</span>
-                <span style={{ color: C.navy, fontFamily: fontSans, fontWeight: 700 }}>${Math.round(generatorAdd).toLocaleString()}</span>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, fontFamily: fontSans }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ color: C.g500 }}>{multiMeterMode && meterBundles.length > 0 ? "Total system size" : "System Size"}</span>
+                  <span style={{ color: C.navy, fontWeight: 700 }}>{formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ color: C.g500 }}>Price per kW</span>
+                  <span style={{ color: C.navy, fontWeight: 700 }}>{costPerKWDisplay}</span>
+                </div>
+                <div style={{ borderTop: `1px dashed ${C.g200}`, marginTop: 2, paddingTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ color: C.blue, fontWeight: 700 }}>System Total (Solar PV)</span>
+                  <span style={{ color: C.blue, fontWeight: 700, fontFamily: fontSans }}>{solarGrossDisplay}</span>
+                </div>
               </div>
-            )}
-          </div>
+            </div>
+
+            {equipmentList}
+
+            <div style={{ marginTop: blockGap, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: blockPad, ...avoid }}>
+              <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
+                Applied Credits & Incentives
+              </div>
+              {activeCreditItems.length === 0 ? (
+                <div style={{ color: C.g500, fontSize: 12, fontFamily: fontSans }}>No credits currently applied.</div>
+              ) : (
+                activeCreditItems.map((item, i) => (
+                  <div key={`${item.key}-${i}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: i < activeCreditItems.length - 1 ? `1px dashed ${C.g200}` : "none", fontSize: 12 }}>
+                    <span style={{ color: C.g700 }}>{item.detailLabel}</span>
+                    <span style={{ color: C.green, fontFamily: fontSans, fontWeight: 700 }}>{item.displayAmount || formatUsd(item.amount)}</span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div style={{ marginTop: blockGap, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: pdfMode && compactMode ? 6 : 8, ...avoid }}>
+              <div style={{ background: summaryDark ? "#22180F" : C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Gross</div>
+                <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>{grossCostDisplay}</div>
+              </div>
+              <div style={{ background: summaryDark ? "#1E2A20" : "#ECF8F5", border: summaryDark ? `1px solid ${C.g200}` : "1px solid #CBECE4", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Credits</div>
+                <div style={{ color: C.green, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>{totalCreditsDisplay}</div>
+              </div>
+              <div style={{ background: summaryDark ? C.gold : C.navy, border: `1px solid ${summaryDark ? C.goldLight : C.navy}`, borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ color: summaryDark ? "#3A2A15" : "rgba(255,255,255,0.7)", fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Net Cost</div>
+                <div style={{ color: summaryDark ? "#1D130A" : "#F8F2E8", fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>{netCostDisplay}</div>
+              </div>
+            </div>
+          </>
         )}
-
-        <div style={{ marginTop: blockGap, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: blockPad, ...avoid }}>
-          <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
-            Applied Credits & Incentives
-          </div>
-          {activeCreditItems.length === 0 ? (
-            <div style={{ color: C.g500, fontSize: 12, fontFamily: fontSans }}>No credits currently applied.</div>
-          ) : (
-            activeCreditItems.map((item, i) => (
-              <div key={`${item.key}-${i}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: i < activeCreditItems.length - 1 ? `1px dashed ${C.g200}` : "none", fontSize: 12 }}>
-                <span style={{ color: C.g700 }}>{item.detailLabel}</span>
-                <span style={{ color: C.green, fontFamily: fontSans, fontWeight: 700 }}>-${Math.round(item.amount).toLocaleString()}</span>
-              </div>
-            ))
-          )}
-        </div>
-
-        <div style={{ marginTop: blockGap, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: pdfMode && compactMode ? 6 : 8, ...avoid }}>
-          <div style={{ background: summaryDark ? "#22180F" : C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: "10px 12px" }}>
-            <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Gross</div>
-            <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>${Math.round(grossCost).toLocaleString()}</div>
-          </div>
-          <div style={{ background: summaryDark ? "#1E2A20" : "#ECF8F5", border: summaryDark ? `1px solid ${C.g200}` : "1px solid #CBECE4", borderRadius: 8, padding: "10px 12px" }}>
-            <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Credits</div>
-            <div style={{ color: C.green, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>-${Math.round(totalCredits).toLocaleString()}</div>
-          </div>
-          <div style={{ background: summaryDark ? C.gold : C.navy, border: `1px solid ${summaryDark ? C.goldLight : C.navy}`, borderRadius: 8, padding: "10px 12px" }}>
-            <div style={{ color: summaryDark ? "#3A2A15" : "rgba(255,255,255,0.7)", fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Net Cost</div>
-            <div style={{ color: summaryDark ? "#1D130A" : "#F8F2E8", fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>${Math.round(netCost).toLocaleString()}</div>
-          </div>
-        </div>
       </div>
     );
     if (pdfMode) return inner;
@@ -2671,45 +3357,50 @@ export default function JantaProposal({
 
   const renderMeterChartsBlock = (bundle, { chartH = 155, seasonalH = 155, compact = false, forPdf = false, pairPage = false, firstPageMeter = false } = {}) => {
     const meterHasUsage = bundle.hasMonthlyUsageData;
-    const compTitle = meterHasUsage ? "Janta Power Comparative Analysis" : "Janta Power Month-Month Production";
     const screenDark = forPdf ? false : proposalScreenDark;
+    const prodChart = buildProductionChartConfig({
+      salesShowcase: salesShowcaseMode,
+      hasUsage: meterHasUsage,
+      monthlyProd: bundle.monthlyProd,
+      monthlyTradProd: bundle.monthlyTradProd,
+      monthlyKWhNumeric: bundle.monthlyKWhNumeric,
+      usageMissingMask: bundle.usageMissingMask,
+      forPdf,
+      chartProdColor,
+      chartUsageColor,
+      chartTradColor,
+      screenDark,
+      useMwh: useMwhDisplay,
+    });
     const metricsGap = forPdf ? (firstPageMeter ? 6 : pairPage ? 8 : compact ? 14 : 22) : (compact ? 8 : 12);
     const chartTopGap = forPdf ? (firstPageMeter ? 2 : pairPage ? 4 : compact ? 6 : 8) : 0;
     return (
       <>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: metricsGap }}>
-          <Metric label="System size" value={formatKw(bundle.effectiveSize)} sub="kW" highlight />
-          <Metric label="Annual production" value={bundle.annualProd.toLocaleString()} sub="kWh/yr" color={C.blue} highlight />
-          {meterHasUsage && <Metric label="Annual usage" value={bundle.annualKWh.toLocaleString()} sub="kWh/yr" />}
+          <Metric label="System size" value={formatSystemKw(bundle.effectiveSize, useMwDisplay)} sub={systemUnitLabel(useMwDisplay)} highlight />
+          <Metric label="Annual production" value={formatEnergyKwh(bundle.annualProd, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay, { perYear: true })} color={C.blue} highlight />
+          {meterHasUsage && <Metric label="Annual usage" value={formatEnergyKwh(bundle.annualKWh, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay, { perYear: true })} />}
         </div>
-        <h4 style={{ margin: `${chartTopGap}px 0 ${compact ? 8 : 10}px 0`, fontSize: compact ? 14 : 16, fontWeight: 700, color: titleColor }}>{compTitle}</h4>
+        <h4 style={{ margin: `${chartTopGap}px 0 ${compact ? 8 : 10}px 0`, fontSize: compact ? 14 : 16, fontWeight: 700, color: titleColor }}>{prodChart.title}</h4>
         <BarChart
-          data={bundle.monthlyProd}
-          data2={meterHasUsage ? bundle.monthlyKWhNumeric : undefined}
-          missingMask2={meterHasUsage ? bundle.usageMissingMask : undefined}
+          {...prodChart.chart}
           missingBarColor={screenDark ? "#E85D5D" : "#D64545"}
           labels={MONTHS}
-          color1={forPdf ? C.gold : chartProdColor}
-          color2={forPdf ? C.navy : chartUsageColor}
           height={chartH}
           showBarValues={forPdf}
-          legend={
-            meterHasUsage
-              ? [
-                  { label: "Production (kWh)", color: forPdf ? C.gold : chartProdColor },
-                  { label: "Usage (kWh)", color: forPdf ? C.navy : chartUsageColor },
-                  ...(bundle.usageMissingMask.some(Boolean)
-                    ? [{ label: "Usage not provided", color: screenDark ? "#E85D5D" : "#D64545" }]
-                    : []),
-                ]
-              : [{ label: "Production (kWh)", color: forPdf ? C.gold : chartProdColor }]
-          }
         />
         <h4 style={{ margin: firstPageMeter ? "6px 0 3px 0" : pairPage ? "8px 0 4px 0" : compact ? "12px 0 6px 0" : "16px 0 6px 0", fontSize: firstPageMeter ? 12 : compact || pairPage ? 13 : 16, fontWeight: 700, color: titleColor }}>Seasonal Production</h4>
         <p style={{ color: C.g500, fontSize: firstPageMeter ? 9 : pairPage ? 9 : compact ? 10 : 11, fontFamily: fontSans, margin: firstPageMeter ? "0 0 4px 0" : pairPage ? "0 0 6px 0" : "0 0 10px 0" }}>
-          Average power (kW) by month for the {formatKw(bundle.effectiveSize)} kW system{samData ? " — from NREL PVWatts" : ""}.
+          Average power (kW) by month for the {formatSystemWithUnit(bundle.effectiveSize, useMwDisplay)} system{samData ? " — from NREL PVWatts" : ""}.
         </p>
-        <SeasonalChart monthlyKWh={bundle.monthlyProd} color={C.gold} height={seasonalH} title="" />
+        <SeasonalChart
+          monthlyKWh={bundle.monthlyProd}
+          color={C.gold}
+          height={seasonalH}
+          title=""
+          compact={forPdf && seasonalH < 130}
+          useMwh={useMwhDisplay}
+        />
       </>
     );
   };
@@ -3029,7 +3720,10 @@ export default function JantaProposal({
                 </div>
                 {multiMeterMode && meterBundles.length > 0 && (
                   <span style={{ fontSize: 10, fontFamily: fontSans, color: C.g500, background: C.cream, padding: "3px 8px", borderRadius: 999, border: `1px solid ${C.g200}` }}>
-                    {effectiveSizeProject.toFixed(1)} kW · {annualKWhProject.toLocaleString()} kWh/yr
+                    {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}
+                    {productionOnlyMode
+                      ? ` · ${formatEnergyWithUnit(annualProdProject, useMwhDisplay, { perYear: true })} prod`
+                      : ` · ${formatEnergyWithUnit(annualKWhProject, useMwhDisplay, { perYear: true })}`}
                   </span>
                 )}
               </div>
@@ -3037,6 +3731,8 @@ export default function JantaProposal({
                 <Toggle label="Multi-meter" checked={multiMeterMode} onChange={onMultiMeterToggle} />
                 <Toggle label="Production-only" checked={productionOnlyMode} onChange={onProductionOnlyToggle} />
                 <Toggle label="Usage compare (no $)" checked={usageComparisonMode} onChange={onUsageComparisonToggle} />
+                <Toggle label="Savings & offset (no ROI)" checked={savingsOnlyMode} onChange={onSavingsOnlyToggle} />
+                <Toggle label="Sales showcase" checked={salesShowcaseMode} onChange={setSalesShowcaseMode} />
               </div>
             </div>
 
@@ -3086,7 +3782,7 @@ export default function JantaProposal({
             )}
 
             {/* ── Project meters (name / number) ── */}
-            {multiMeterMode && !productionOnlyMode && (
+            {multiMeterMode && (
               <div style={{ background: C.white, borderRadius: 10, padding: "14px 16px", border: `1px solid ${C.g200}` }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                   <div style={{ width: 4, height: 16, background: C.gold, borderRadius: 2 }} />
@@ -3096,25 +3792,53 @@ export default function JantaProposal({
                   </span>
                 </div>
                 <p style={{ color: C.g500, fontSize: 10, fontFamily: fontSans, margin: "0 0 10px 0" }}>
-                  Enter meter # first — name fills as Meter 60-01 (your meter id). Up to {MAX_PROJECT_METERS} meters per project. Usage is entered below.
+                  {productionOnlyMode
+                    ? `Name each meter (optional meter #). Set kW per meter on the next step — up to ${MAX_PROJECT_METERS} meters per project.`
+                    : `Optional meter # auto-fills the name field (e.g. Meter 60-01). Edit the name to anything you like. Up to ${MAX_PROJECT_METERS} meters per project.`}
                 </p>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {meters.map((m, i) => {
                     const s = summarizeMeterUsage(m);
                     const saved = Boolean(m.usageSavedAt && s.hasData);
                     return (
-                      <div key={m.id} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end", padding: "10px 12px", background: i === usageMeterIdx ? `${C.gold}14` : C.g100, borderRadius: 8, border: `1px solid ${i === usageMeterIdx ? C.gold : saved ? C.green : C.g200}` }}>
+                      <div key={m.id} style={{ display: "grid", gridTemplateColumns: productionOnlyMode ? "1fr 1fr auto" : "1fr 1fr auto", gap: 8, alignItems: "end", padding: "10px 12px", background: !productionOnlyMode && i === usageMeterIdx ? `${C.gold}14` : C.g100, borderRadius: 8, border: `1px solid ${!productionOnlyMode && i === usageMeterIdx ? C.gold : saved ? C.green : C.g200}` }}>
                         <Field label="Meter #" value={m.meterNumber || ""} onChange={(v) => updateMeterNumber(i, v)} placeholder="12345678" />
-                        <Field label="Meter name" value={m.name || ""} onChange={(v) => updateMeter(i, { name: v })} placeholder="Meter 60-01" />
-                        <div style={{ paddingBottom: 6, textAlign: "right", fontFamily: fontSans, fontSize: 10, minWidth: 76 }}>
-                          {saved ? (
-                            <span style={{ color: C.green, fontWeight: 700 }}>✓ Saved<br /><span style={{ color: C.navy, fontWeight: 600 }}>{s.annual.toLocaleString()} kWh</span></span>
-                          ) : s.hasData ? (
-                            <span style={{ color: C.gold, fontWeight: 600 }}>Draft<br />{s.annual.toLocaleString()} kWh</span>
-                          ) : (
-                            <span style={{ color: C.g500 }}>No usage</span>
-                          )}
-                        </div>
+                        <Field label="Name" value={m.name || ""} onChange={(v) => updateMeter(i, { name: v })} placeholder="Meter …" />
+                        {productionOnlyMode ? (
+                          <button
+                            type="button"
+                            disabled={meters.length <= 1}
+                            onClick={() => {
+                              if (meters.length <= 1) return;
+                              const name = formatMeterDisplayName(m.name, m.meterNumber);
+                              if (window.confirm(`Remove ${name} from this project?`)) deleteMeter(i);
+                            }}
+                            title="Remove meter"
+                            style={{
+                              paddingBottom: 6,
+                              border: "none",
+                              background: "transparent",
+                              color: meters.length <= 1 ? C.g400 : C.red,
+                              fontSize: 18,
+                              fontWeight: 600,
+                              cursor: meters.length <= 1 ? "default" : "pointer",
+                              fontFamily: fontSans,
+                              lineHeight: 1,
+                            }}
+                          >
+                            ×
+                          </button>
+                        ) : (
+                          <div style={{ paddingBottom: 6, textAlign: "right", fontFamily: fontSans, fontSize: 10, minWidth: 76 }}>
+                            {saved ? (
+                              <span style={{ color: C.green, fontWeight: 700 }}>✓ Saved<br /><span style={{ color: C.navy, fontWeight: 600 }}>{formatEnergyWithUnit(s.annual, useMwhDisplay)}</span></span>
+                            ) : s.hasData ? (
+                              <span style={{ color: C.gold, fontWeight: 600 }}>Draft<br />{formatEnergyWithUnit(s.annual, useMwhDisplay)}</span>
+                            ) : (
+                              <span style={{ color: C.g500 }}>No usage</span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -3187,7 +3911,10 @@ export default function JantaProposal({
                 const usageSummary = multiMeterMode ? summarizeMeterUsage(usageMeter) : null;
                 const usageSaved = Boolean(usageMeter?.usageSavedAt && usageSummary?.hasData);
                 const isLastUsageMeter = usageMeterIdx >= meters.length - 1;
-                const nextMeterName = meters[usageMeterIdx + 1]?.name;
+                const nextMeterName = formatMeterDisplayName(
+                  meters[usageMeterIdx + 1]?.name,
+                  meters[usageMeterIdx + 1]?.meterNumber
+                );
                 const savedMetersCount = meters.filter((m) => m.usageSavedAt && summarizeMeterUsage(m).hasData).length;
                 const canSaveMeter = usageSummary?.hasData;
                 return (
@@ -3229,7 +3956,7 @@ export default function JantaProposal({
                             key={m.id}
                             type="button"
                             onClick={() => selectUsageMeter(i)}
-                            title={saved ? `Saved · ${s.annual.toLocaleString()} kWh/yr` : draft ? "Draft" : "Not entered"}
+                            title={saved ? `Saved · ${formatEnergyWithUnit(s.annual, useMwhDisplay, { perYear: true })}` : draft ? "Draft" : "Not entered"}
                             style={{
                               flex: "1 1 88px",
                               minWidth: 88,
@@ -3246,7 +3973,7 @@ export default function JantaProposal({
                           >
                             <div style={{ fontSize: 11, fontWeight: 700, lineHeight: 1.25, marginBottom: 2 }}>{formatMeterDisplayName(m.name, m.meterNumber)}</div>
                             <div style={{ fontSize: 9, opacity: active ? 0.85 : 0.75, lineHeight: 1.2 }}>
-                              {saved ? `✓ Saved · ${s.annual.toLocaleString()} kWh` : draft ? `${s.filled}/12 mo · draft` : "No usage yet"}
+                              {saved ? `✓ Saved · ${formatEnergyWithUnit(s.annual, useMwhDisplay)}` : draft ? `${s.filled}/12 mo · draft` : "No usage yet"}
                             </div>
                           </button>
                         );
@@ -3286,26 +4013,33 @@ export default function JantaProposal({
                 {usageCount > 0 && (usageAnnual > 0 || usageMask.some(Boolean)) && (
                   <div style={{ marginTop: 12 }}>
                     <BarChart
-                      data={usageNumeric}
+                      data={scaleEnergySeriesForDisplay(usageNumeric, useMwhDisplay)}
+                      rawData={usageNumeric}
                       missingMask1={usageMask}
                       missingBarColor={darkThemeActive ? "#E85D5D" : "#D64545"}
                       labels={MONTHS}
                       color1={darkThemeActive ? C.goldLight : C.navy}
                       height={130}
+                      valueUnit={useMwhDisplay ? "MWh" : "kWh"}
                       legend={[
-                        { label: multiMeterMode ? `${usageMeter?.name || "Meter"} usage (kWh)` : "Monthly Usage (kWh)", color: darkThemeActive ? C.goldLight : C.navy },
+                        {
+                          label: multiMeterMode
+                            ? `${formatMeterDisplayName(usageMeter?.name, usageMeter?.meterNumber)} usage (${energyUnitLabel(useMwhDisplay)})`
+                            : energySeriesLegendLabel("Monthly Usage", useMwhDisplay),
+                          color: darkThemeActive ? C.goldLight : C.navy,
+                        },
                         ...(usageMask.some(Boolean)
                           ? [{ label: "Not provided", color: darkThemeActive ? "#E85D5D" : "#D64545" }]
                           : []),
                       ]}
                     />
                     <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                      <Metric label={multiMeterMode ? "Meter annual" : "Annual"} value={usageAnnual.toLocaleString()} sub="kWh" color={darkThemeActive ? C.goldLight : C.navy} />
+                      <Metric label={multiMeterMode ? "Meter annual" : "Annual"} value={formatEnergyKwh(usageAnnual, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay)} color={darkThemeActive ? C.goldLight : C.navy} />
                       {includeUtilityBillEconomics && !multiMeterMode && (
                         <Metric label="Annual cost" value={`$${(annualKWh * rate).toLocaleString(undefined, { maximumFractionDigits: 0 })}`} color={C.red} />
                       )}
                       {multiMeterMode && (
-                        <Metric label="Project total" value={annualKWhProject.toLocaleString()} sub={`kWh · ${effectiveSizeProject.toFixed(1)} kW`} />
+                        <Metric label="Project total" value={formatEnergyKwh(annualKWhProject, useMwhDisplay)} sub={`${energyUnitLabel(useMwhDisplay)} · ${formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}`} />
                       )}
                     </div>
                   </div>
@@ -3436,7 +4170,9 @@ export default function JantaProposal({
                   {multiMeterMode && (
                     <>
                       <p style={{ margin: "0 0 10px 0", fontSize: 11, color: C.g500, fontFamily: fontSans, lineHeight: 1.45 }}>
-                        Size each meter from its own usage. Project pricing uses the <strong style={{ color: titleColor }}>combined {effectiveSizeProject.toFixed(1)} kW</strong> as one system.
+                        {productionOnlyMode
+                          ? <>Set kW for each meter. Project pricing uses the <strong style={{ color: titleColor }}>combined {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}</strong> as one system.</>
+                          : <>Size each meter from its own usage. Project pricing uses the <strong style={{ color: titleColor }}>combined {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}</strong> as one system.</>}
                       </p>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
                         {meters.map((m, i) => (
@@ -3446,8 +4182,8 @@ export default function JantaProposal({
                             color: i === activeMeterIdx ? "#F8F2E8" : C.g700,
                             borderRadius: 14, padding: "5px 11px", fontFamily: fontSans, fontSize: 11, cursor: "pointer",
                           }}>
-                            {m.name}
-                            <span style={{ opacity: 0.85, marginLeft: 5 }}>{(meterBundles[i]?.effectiveSize || 0).toFixed(1)} kW</span>
+                            {formatMeterDisplayName(m.name, m.meterNumber)}
+                            <span style={{ opacity: 0.85, marginLeft: 5 }}>{formatSystemWithUnit(meterBundles[i]?.effectiveSize || 0, useMwDisplay)}</span>
                           </button>
                         ))}
                       </div>
@@ -3465,7 +4201,7 @@ export default function JantaProposal({
                         return (
                           <>
                             <Field
-                              label={`System size — ${activeMeter?.name || "Meter"}`}
+                              label={`System size — ${formatMeterDisplayName(activeMeter?.name, activeMeter?.meterNumber)}`}
                               value={activeMeter?.systemSizeKw ?? ""}
                               onChange={(v) => updateMeter(activeMeterIdx, { systemSizeKw: v })}
                               type="text"
@@ -3496,7 +4232,9 @@ export default function JantaProposal({
                               }
                             />
                             <div style={{ marginTop: 2, color: C.g500, fontSize: 9, fontFamily: fontSans, lineHeight: 1.35 }}>
-                              Blank → ~60% offset for this meter · {SYSTEM_SIZE_STEP_KW} kW steps
+                              {productionOnlyMode
+                                ? `Blank → ${SYSTEM_SIZE_STEP_KW} kW default · ${SYSTEM_SIZE_STEP_KW} kW steps`
+                                : `Blank → ~60% offset for this meter · ${SYSTEM_SIZE_STEP_KW} kW steps`}
                             </div>
                           </>
                         );
@@ -3555,15 +4293,29 @@ export default function JantaProposal({
                   </div>
                   <div style={{ display: "flex", gap: 10, marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.g200}`, flexWrap: "wrap" }}>
                     {multiMeterMode ? (
-                      <>
-                        <Metric label={`${activeMeter?.name || "Meter"} offset`} value={`${(activeMeterBundle?.offsetPct || 0).toFixed(0)}%`} sub="this meter" color={offsetChipTone(activeMeterBundle?.offsetPct || 0)} highlight />
-                        <Metric label={`${activeMeter?.name || "Meter"} production`} value={(activeMeterBundle?.annualProd || 0).toLocaleString()} sub="kWh/yr" color={C.blue} highlight />
-                        <Metric label="Project total" value={effectiveSizeProject.toFixed(1)} sub={`kW · ${annualProd.toLocaleString()} kWh/yr`} />
-                      </>
+                      productionOnlyMode ? (
+                        <>
+                          <Metric label={`${formatMeterDisplayName(activeMeter?.name, activeMeter?.meterNumber)} production`} value={formatEnergyKwh(activeMeterBundle?.annualProd || 0, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay, { perYear: true })} color={C.blue} highlight />
+                          <Metric label={`${formatMeterDisplayName(activeMeter?.name, activeMeter?.meterNumber)} size`} value={formatSystemKw(activeMeterBundle?.effectiveSize || SYSTEM_SIZE_STEP_KW, useMwDisplay)} sub={systemUnitLabel(useMwDisplay)} highlight />
+                          <Metric label="Project total" value={formatSystemKw(effectiveSizeProject, useMwDisplay)} sub={`${systemUnitLabel(useMwDisplay)} · ${formatEnergyWithUnit(annualProd, useMwhDisplay, { perYear: true })}`} />
+                        </>
+                      ) : (
+                        <>
+                          <Metric label={`${formatMeterDisplayName(activeMeter?.name, activeMeter?.meterNumber)} offset`} value={`${(activeMeterBundle?.offsetPct || 0).toFixed(0)}%`} sub="this meter" color={offsetChipTone(activeMeterBundle?.offsetPct || 0)} highlight />
+                          <Metric label={`${formatMeterDisplayName(activeMeter?.name, activeMeter?.meterNumber)} production`} value={formatEnergyKwh(activeMeterBundle?.annualProd || 0, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay, { perYear: true })} color={C.blue} highlight />
+                          <Metric label="Project total" value={formatSystemKw(effectiveSizeProject, useMwDisplay)} sub={`${systemUnitLabel(useMwDisplay)} · ${formatEnergyWithUnit(annualProd, useMwhDisplay, { perYear: true })}`} />
+                          {savingsOnlyMode && (
+                            <Metric label="25-yr savings" value={`$${Math.round(savings25).toLocaleString()}`} sub="est. bill offset" color={C.green} highlight />
+                          )}
+                        </>
+                      )
                     ) : (
                       <>
                         <Metric label="Offset" value={`${offsetPct.toFixed(0)}%`} sub="of annual usage" color={offsetChipTone(offsetPct)} highlight />
-                        <Metric label="Annual production" value={annualProd.toLocaleString()} sub="kWh/yr" color={C.blue} highlight />
+                        <Metric label="Annual production" value={formatEnergyKwh(annualProd, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay, { perYear: true })} color={C.blue} highlight />
+                        {savingsOnlyMode && (
+                          <Metric label="25-yr savings" value={`$${Math.round(savings25).toLocaleString()}`} sub="est. bill offset" color={C.green} highlight />
+                        )}
                       </>
                     )}
                   </div>
@@ -3572,28 +4324,40 @@ export default function JantaProposal({
                       <thead>
                         <tr style={{ color: C.g500, fontSize: 9, textTransform: "uppercase" }}>
                           <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: `1px solid ${C.g200}` }}>Meter</th>
-                          <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: `1px solid ${C.g200}` }}>Usage/yr</th>
-                          <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: `1px solid ${C.g200}` }}>Size</th>
-                          <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: `1px solid ${C.g200}` }}>Offset</th>
-                          <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: `1px solid ${C.g200}` }}>Production</th>
+                          {!productionOnlyMode && (
+                            <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: `1px solid ${C.g200}` }}>Usage/yr ({energyUnitLabel(useMwhDisplay)})</th>
+                          )}
+                          <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: `1px solid ${C.g200}` }}>Size ({systemUnitLabel(useMwDisplay)})</th>
+                          {!productionOnlyMode && (
+                            <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: `1px solid ${C.g200}` }}>Offset</th>
+                          )}
+                          <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: `1px solid ${C.g200}` }}>Production ({energyUnitLabel(useMwhDisplay)})</th>
                         </tr>
                       </thead>
                       <tbody>
                         {meterBundles.map((b) => (
                           <tr key={b.id}>
-                            <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, color: C.g700, fontWeight: 600 }}>{b.name}</td>
-                            <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, textAlign: "right", color: C.g700 }}>{b.annualKWh.toLocaleString()}</td>
-                            <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, textAlign: "right", color: C.navy, fontWeight: 700 }}>{b.effectiveSize.toFixed(1)} kW</td>
-                            <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, textAlign: "right", fontWeight: 700, color: offsetChipTone(b.offsetPct) }}>{b.offsetPct.toFixed(0)}%</td>
-                            <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, textAlign: "right", color: C.blue }}>{b.annualProd.toLocaleString()}</td>
+                            <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, color: C.g700, fontWeight: 600 }}>{formatMeterDisplayName(b.name, b.meterNumber)}</td>
+                            {!productionOnlyMode && (
+                              <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, textAlign: "right", color: C.g700 }}>{formatEnergyKwh(b.annualKWh, useMwhDisplay)}</td>
+                            )}
+                            <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, textAlign: "right", color: C.navy, fontWeight: 700 }}>{formatSystemKw(b.effectiveSize, useMwDisplay)}</td>
+                            {!productionOnlyMode && (
+                              <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, textAlign: "right", fontWeight: 700, color: offsetChipTone(b.offsetPct) }}>{b.offsetPct.toFixed(0)}%</td>
+                            )}
+                            <td style={{ padding: "6px", borderBottom: `1px solid ${C.g200}`, textAlign: "right", color: C.blue }}>{formatEnergyKwh(b.annualProd, useMwhDisplay)}</td>
                           </tr>
                         ))}
                         <tr style={{ background: C.white }}>
                           <td style={{ padding: "6px", fontWeight: 700, color: titleColor }}>Project total</td>
-                          <td style={{ padding: "6px", textAlign: "right", fontWeight: 700 }}>{annualKWhProject.toLocaleString()}</td>
-                          <td style={{ padding: "6px", textAlign: "right", fontWeight: 700, color: C.navy }}>{effectiveSizeProject.toFixed(1)} kW</td>
-                          <td style={{ padding: "6px", textAlign: "right", fontWeight: 700, color: offsetChipTone(offsetPct) }}>{offsetPct.toFixed(0)}%</td>
-                          <td style={{ padding: "6px", textAlign: "right", fontWeight: 700, color: C.blue }}>{annualProd.toLocaleString()}</td>
+                          {!productionOnlyMode && (
+                            <td style={{ padding: "6px", textAlign: "right", fontWeight: 700 }}>{formatEnergyKwh(annualKWhProject, useMwhDisplay)}</td>
+                          )}
+                          <td style={{ padding: "6px", textAlign: "right", fontWeight: 700, color: C.navy }}>{formatSystemKw(effectiveSizeProject, useMwDisplay)}</td>
+                          {!productionOnlyMode && (
+                            <td style={{ padding: "6px", textAlign: "right", fontWeight: 700, color: offsetChipTone(offsetPct) }}>{offsetPct.toFixed(0)}%</td>
+                          )}
+                          <td style={{ padding: "6px", textAlign: "right", fontWeight: 700, color: C.blue }}>{formatEnergyKwh(annualProd, useMwhDisplay)}</td>
                         </tr>
                       </tbody>
                     </table>
@@ -3617,7 +4381,7 @@ export default function JantaProposal({
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                       <button
                         type="button"
-                        onClick={() => setOptionalEquipmentOpen(true)}
+                        onClick={openEquipmentEditor}
                         aria-label="Add battery or generator"
                         style={{
                           display: "block",
@@ -3653,11 +4417,11 @@ export default function JantaProposal({
                           }}
                         >
                           {[
-                            hasBatteryAddition
-                              ? `Battery: ${batteryName.trim() || "Added"}${batteryAdd > 0 ? ` ($${Math.round(batteryAdd).toLocaleString()})` : ""}`
+                            batteryEquipment.length > 0
+                              ? `Battery: ${batteryEquipment.map((item) => equipmentSummaryLine(item)).join(", ")}`
                               : null,
-                            hasGeneratorAddition
-                              ? `Generator: ${generatorName.trim() || "Added"}${generatorAdd > 0 ? ` ($${Math.round(generatorAdd).toLocaleString()})` : ""}`
+                            generatorEquipment.length > 0
+                              ? `Generator: ${generatorEquipment.map((item) => equipmentSummaryLine(item)).join(", ")}`
                               : null,
                           ].filter(Boolean).join("  ·  ")}
                         </div>
@@ -3666,126 +4430,51 @@ export default function JantaProposal({
                   ) : (
                     <>
                       <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "stretch" }}>
-                        <div
+                        {sortEquipmentForEditor(optionalEquipment)
+                          .filter((item) => item.kind === "battery")
+                          .map((item) => renderEquipmentEditorRow(item))}
+                        <button
+                          type="button"
+                          onClick={() => setOptionalEquipment((prev) => [...prev, createEmptyEquipment("battery")])}
                           style={{
-                            display: "grid",
-                            gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
-                            gap: 8,
-                            alignItems: "center",
-                            minWidth: 0,
+                            background: "transparent",
+                            border: "none",
+                            color: C.blue,
+                            fontSize: 11,
+                            fontFamily: fontSans,
+                            cursor: "pointer",
+                            padding: 0,
+                            textAlign: "left",
+                            width: "fit-content",
                           }}
                         >
-                          <Field
-                            label="Battery storage"
-                            value={batteryName}
-                            onChange={(v) => {
-                              setBatteryName(v);
-                              if (!v.trim()) {
-                                setBatteryCost("");
-                                return;
-                              }
-                              const hit = BATTERY_PRESETS.find((p) => p.label === v);
-                              if (hit?.cost != null) setBatteryCost(String(hit.cost));
-                            }}
-                            placeholder="Type or select…"
-                            shrink
-                            list="janta-battery-presets"
-                          />
-                          <Field label="Amount" value={batteryCost} onChange={setBatteryCost} type="number" unit="$" placeholder="0" shrink />
-                          <button
-                            type="button"
-                            onClick={() => { setBatteryName(""); setBatteryCost(""); }}
-                            disabled={!batteryName.trim() && !String(batteryCost).trim()}
-                            aria-label="Clear battery"
-                            title="Clear battery"
-                            style={{
-                              flexShrink: 0,
-                              alignSelf: "center",
-                              width: 28,
-                              height: 28,
-                              border: "none",
-                              background: "transparent",
-                              color: batteryName.trim() || String(batteryCost).trim() ? "#2f3e4d" : C.g300,
-                              fontSize: 20,
-                              fontWeight: 600,
-                              lineHeight: 1,
-                              padding: 0,
-                              cursor: batteryName.trim() || String(batteryCost).trim() ? "pointer" : "not-allowed",
-                              fontFamily: fontSans,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              opacity: batteryName.trim() || String(batteryCost).trim() ? 1 : 0.4,
-                            }}
-                          >
-                            ×
-                          </button>
-                        </div>
-                        <div
+                          + Another battery
+                        </button>
+                        {sortEquipmentForEditor(optionalEquipment)
+                          .filter((item) => item.kind === "generator")
+                          .map((item) => renderEquipmentEditorRow(item))}
+                        <button
+                          type="button"
+                          onClick={() => setOptionalEquipment((prev) => [...prev, createEmptyEquipment("generator")])}
                           style={{
-                            display: "grid",
-                            gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) auto",
-                            gap: 8,
-                            alignItems: "center",
-                            minWidth: 0,
+                            background: "transparent",
+                            border: "none",
+                            color: C.blue,
+                            fontSize: 11,
+                            fontFamily: fontSans,
+                            cursor: "pointer",
+                            padding: 0,
+                            textAlign: "left",
+                            width: "fit-content",
                           }}
                         >
-                          <Field
-                            label="Generator"
-                            value={generatorName}
-                            onChange={(v) => {
-                              setGeneratorName(v);
-                              if (!v.trim()) {
-                                setGeneratorCost("");
-                                return;
-                              }
-                              const hit = GENERATOR_PRESETS.find((p) => p.label === v);
-                              if (hit?.cost != null) setGeneratorCost(String(hit.cost));
-                            }}
-                            placeholder="Type or select…"
-                            shrink
-                            list="janta-generator-presets"
-                          />
-                          <Field label="Amount" value={generatorCost} onChange={setGeneratorCost} type="number" unit="$" placeholder="0" shrink />
-                          <button
-                            type="button"
-                            onClick={() => { setGeneratorName(""); setGeneratorCost(""); }}
-                            disabled={!generatorName.trim() && !String(generatorCost).trim()}
-                            aria-label="Clear generator"
-                            title="Clear generator"
-                            style={{
-                              flexShrink: 0,
-                              alignSelf: "center",
-                              width: 28,
-                              height: 28,
-                              border: "none",
-                              background: "transparent",
-                              color: generatorName.trim() || String(generatorCost).trim() ? "#2f3e4d" : C.g300,
-                              fontSize: 20,
-                              fontWeight: 600,
-                              lineHeight: 1,
-                              padding: 0,
-                              cursor: generatorName.trim() || String(generatorCost).trim() ? "pointer" : "not-allowed",
-                              fontFamily: fontSans,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              opacity: generatorName.trim() || String(generatorCost).trim() ? 1 : 0.4,
-                            }}
-                          >
-                            ×
-                          </button>
-                        </div>
+                          + Another generator
+                        </button>
                       </div>
                       <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.g200}`, display: "flex", gap: 8 }}>
                         <button
                           type="button"
-                          onClick={() => {
-                            setBatteryName("");
-                            setBatteryCost("");
-                            setGeneratorName("");
-                            setGeneratorCost("");
-                          }}
+                          onClick={clearAllEquipment}
                           aria-label="Clear all additions"
                           style={{
                             flex: 1,
@@ -3806,7 +4495,7 @@ export default function JantaProposal({
                         </button>
                         <button
                           type="button"
-                          onClick={() => setOptionalEquipmentOpen(false)}
+                          onClick={saveEquipmentEditor}
                           aria-label="Save and close system additions"
                           style={{
                             flex: 1,
@@ -3843,9 +4532,9 @@ export default function JantaProposal({
                 </div>
               </div>
 
-            {multiMeterMode && activeMeterBundle?.hasMonthlyUsageData ? (
+            {multiMeterMode ? (
               renderProposalPreviewShell(
-                `${activeMeter?.name || "Meter"} charts`,
+                `${formatMeterDisplayName(activeMeter?.name, activeMeter?.meterNumber)} charts`,
                 <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}` }}>
                   <h3 style={{ margin: "0 0 4px 0", fontSize: 18, fontWeight: 700, color: titleColor }}>{formatMeterDisplayName(activeMeter?.name, activeMeter?.meterNumber)}</h3>
                   <p style={{ margin: "0 0 12px 0", fontSize: 11, color: C.g500, fontFamily: fontSans }}>
@@ -3857,32 +4546,17 @@ export default function JantaProposal({
             ) : (
               <>
                 {renderProposalPreviewShell(
-                  hasMonthlyUsageData ? "Janta Power Comparative Analysis" : "Janta Power Month-Month Production",
+                  step1ProdChart.title,
                   <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}` }}>
                     <h3 style={{ margin: "0 0 14px 0", fontSize: 18, fontWeight: 700, color: titleColor }}>
-                      {hasMonthlyUsageData ? "Janta Power Comparative Analysis" : "Janta Power Month-Month Production"}
+                      {step1ProdChart.title}
                     </h3>
                     <BarChart
-                      data={monthlyProd}
-                      data2={hasMonthlyUsageData ? monthlyKWhNumeric : undefined}
-                      missingMask2={hasMonthlyUsageData ? usageMissingMask : undefined}
+                      {...step1ProdChart.chart}
                       missingBarColor={darkThemeActive ? "#E85D5D" : "#D64545"}
                       labels={MONTHS}
-                      color1={chartProdColor}
-                      color2={chartUsageColor}
                       height={175}
                       showBarValues
-                      legend={
-                        hasMonthlyUsageData
-                          ? [
-                              { label: "Janta Energy Production (kWh)", color: chartProdColor },
-                              { label: "Current Energy Usage", color: chartUsageColor },
-                              ...(usageMissingMask.some(Boolean)
-                                ? [{ label: "Usage not provided", color: darkThemeActive ? "#E85D5D" : "#D64545" }]
-                                : []),
-                            ]
-                          : [{ label: "Janta Energy Production (kWh)", color: chartProdColor }]
-                      }
                     />
                   </div>
                 )}
@@ -3891,9 +4565,9 @@ export default function JantaProposal({
                   <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}` }}>
                     <h3 style={{ margin: "0 0 6px 0", fontSize: 18, fontWeight: 700, color: titleColor }}>Seasonal Production</h3>
                     <p style={{ color: C.g500, fontSize: 11, fontFamily: fontSans, margin: "0 0 14px 0" }}>
-                      Average power (kW) by month for the {formatKw(effectiveSizeProject)} kW system{samData ? " — from NREL PVWatts" : ""}.
+                      Average power (kW) by month for the {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} system{samData ? " — from NREL PVWatts" : ""}.
                     </p>
-                    <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={155} title="" />
+                    <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={155} title="" useMwh={useMwhDisplay} />
                   </div>
                 )}
               </>
@@ -3914,14 +4588,45 @@ export default function JantaProposal({
                 <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
                 <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>Project Pricing</h3>
               </div>
-              <div>
-                <Field
-                  value={pricingPerKW}
-                  onChange={setPricingPerKW}
-                  type="number"
-                  unit="$/kW"
-                  placeholder="3000"
-                />
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 6, textTransform: "uppercase", fontFamily: fontSans }}>Solar price</label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 }}>
+                  <Pill active={!pricingUseRange} onClick={() => setPricingUseRange(false)}>Single $/kW</Pill>
+                  <Pill active={pricingUseRange} onClick={() => setPricingUseRange(true)}>$/kW range</Pill>
+                </div>
+                {pricingUseRange ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <Field
+                      label="Low $/kW"
+                      value={pricingPerKW}
+                      onChange={setPricingPerKW}
+                      type="number"
+                      unit="$/kW"
+                      placeholder="2800"
+                    />
+                    <Field
+                      label="High $/kW"
+                      value={pricingPerKWHigh}
+                      onChange={setPricingPerKWHigh}
+                      type="number"
+                      unit="$/kW"
+                      placeholder="3200"
+                    />
+                  </div>
+                ) : (
+                  <Field
+                    value={pricingPerKW}
+                    onChange={setPricingPerKW}
+                    type="number"
+                    unit="$/kW"
+                    placeholder="3000"
+                  />
+                )}
+                {pricingUseRange && solarPriceRange && (
+                  <div style={{ marginTop: 8, color: C.g500, fontSize: 11, fontFamily: fontSans }}>
+                    Solar PV total: {solarGrossDisplay} · {grossPerWDisplay} · {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -4012,7 +4717,7 @@ export default function JantaProposal({
                       <span style={{ fontSize: 12, color: C.g700, fontFamily: fontSans, fontWeight: 600 }}>{stInc.name} tax credit ({(stInc.tax * 100).toFixed(0)}%)</span>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                         <span style={{ fontSize: 12, fontFamily: fontSans, fontWeight: 700, color: removedCreditKeys.stateTax ? C.g400 : C.green }}>
-                          {removedCreditKeys.stateTax ? "—" : `-$${Math.round(stateTaxAmt).toLocaleString()}`}
+                          {removedCreditKeys.stateTax ? "—" : stateTaxCreditDisplay}
                         </span>
                         <button
                           type="button"
@@ -4051,7 +4756,7 @@ export default function JantaProposal({
                       <span style={{ fontSize: 12, color: C.g700, fontFamily: fontSans, fontWeight: 600 }}>{stInc.srec.label || "SREC"} ({stInc.srec.years} yr)</span>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                         <span style={{ fontSize: 12, fontFamily: fontSans, fontWeight: 700, color: removedCreditKeys.srec ? C.g400 : C.green }}>
-                          {removedCreditKeys.srec ? "—" : `-$${Math.round(srecAmt).toLocaleString()}`}
+                          {removedCreditKeys.srec ? "—" : `$${Math.round(srecAmt).toLocaleString()}`}
                         </span>
                         <button
                           type="button"
@@ -4090,7 +4795,7 @@ export default function JantaProposal({
                       <span style={{ fontSize: 12, color: C.g700, fontFamily: fontSans, fontWeight: 600 }}>{utilRebateLabel || "Utility rebate"}</span>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                         <span style={{ fontSize: 12, fontFamily: fontSans, fontWeight: 700, color: removedCreditKeys.utility ? C.g400 : C.green }}>
-                          {removedCreditKeys.utility ? "—" : `-$${Math.round(utilRebateAmt).toLocaleString()}`}
+                          {removedCreditKeys.utility ? "—" : `$${Math.round(utilRebateAmt).toLocaleString()}`}
                         </span>
                         <button
                           type="button"
@@ -4135,7 +4840,7 @@ export default function JantaProposal({
                     >
                       <span style={{ fontSize: 12, color: C.g700, fontFamily: fontSans, fontWeight: 600 }}>{c.name || "Credit"}</span>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-                        <span style={{ fontSize: 12, fontFamily: fontSans, fontWeight: 700, color: C.green }}>-${Math.round(c.amount || 0).toLocaleString()}</span>
+                        <span style={{ fontSize: 12, fontFamily: fontSans, fontWeight: 700, color: C.green }}>${Math.round(c.amount || 0).toLocaleString()}</span>
                         <button
                           type="button"
                           onClick={() => removeCreditItem(`extra:${c.id}`)}
@@ -4218,7 +4923,20 @@ export default function JantaProposal({
 
         {/* ═══ STEP 3: PROJECT FINANCIALS ═══ */}
         {step === 3 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ background: C.white, borderRadius: 10, padding: "14px 16px", border: `1px solid ${C.g200}` }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 4, height: 16, background: C.gold, borderRadius: 2 }} />
+                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: titleColor }}>Project financials</h3>
+                </div>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px 14px" }}>
+                <Toggle label="Include on proposal" checked={includeFinancialsInProposal} onChange={setIncludeFinancialsInProposal} />
+                <Toggle label="Capital less saved land" checked={includeCapitalLessSavedLand} onChange={setIncludeCapitalLessSavedLand} />
+              </div>
+            </div>
+
             <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
                 <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
@@ -4258,14 +4976,9 @@ export default function JantaProposal({
                   </button>
                 </div>
               )}
-              <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.g200}` }}>
-                <Toggle label="Include Project Financials section on proposal" checked={includeFinancialsInProposal} onChange={setIncludeFinancialsInProposal} />
-                <Toggle label="Include 'Capital Invest Less Value of Saved Land' block" checked={includeCapitalLessSavedLand} onChange={setIncludeCapitalLessSavedLand} />
-              </div>
             </div>
 
-            {includeFinancialsInProposal && (
-              renderProposalPreviewShell(
+            {includeFinancialsInProposal && renderProposalPreviewShell(
                 "Project Financials",
                 <div style={{ background: C.white, borderRadius: 10, padding: 24, border: `1px solid ${C.g200}` }}>
                   <h3 style={{ margin: "0 0 12px 0", fontSize: 16, fontWeight: 700, color: titleColor }}>Project Financials</h3>
@@ -4328,7 +5041,6 @@ export default function JantaProposal({
                   </table>
                   </div>
                 </div>
-              )
             )}
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => setStep(2)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back</button>
@@ -4385,10 +5097,10 @@ export default function JantaProposal({
 
         {/* ═══ STEP 5: PROPOSAL ═══ */}
         {step === 5 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {(() => {
               const compactFirstPageBundle = true;
-              const compactSecondPageBundle = includeFinancialsInProposal && includeUtilityBillEconomics;
+              const compactSecondPageBundle = includeFinancialsInProposal && includeRoiMetrics;
               const compactPageTwoFlow = !startPermissionsOnNewPage;
               const compactPageTwoCosts = compactSecondPageBundle || compactPageTwoFlow;
               const compact25yrPdf = compactSecondPageBundle || compactPageTwoFlow;
@@ -4398,25 +5110,27 @@ export default function JantaProposal({
               const seasonalChartH = compactFirstPageBundle ? 132 : 155;
               return (
                 <>
-            <div style={{ background: C.white, borderRadius: 10, padding: 20, border: `1px solid ${C.g200}` }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-                <div style={{ width: 4, height: 18, background: C.gold, borderRadius: 2 }} />
-                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: titleColor }}>PDF layout</h3>
+            <div style={{ background: C.white, borderRadius: 10, padding: "14px 16px", border: `1px solid ${C.g200}` }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 4, height: 16, background: C.gold, borderRadius: 2 }} />
+                  <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: titleColor }}>PDF layout</h3>
+                </div>
               </div>
-              <div>
-                <Toggle label="Show PDF page breaks" checked={showProposalPageBreaks} onChange={setShowProposalPageBreaks} />
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px 14px" }}>
+                <Toggle label="Show page breaks" checked={showProposalPageBreaks} onChange={setShowProposalPageBreaks} />
                 <Toggle
-                  label="Start Permissions on new page"
+                  label="Permissions on new page"
                   checked={startPermissionsOnNewPage || includeFinancialsInProposal}
                   onChange={setStartPermissionsOnNewPage}
                   disabled={includeFinancialsInProposal}
                 />
-                {includeFinancialsInProposal && (
-                  <div style={{ color: C.g500, fontSize: 11, fontFamily: fontSans, margin: "-4px 0 0 42px", maxWidth: 420 }}>
-                    On while Project Financials is on — Permissions uses page 3.
-                  </div>
-                )}
               </div>
+              {includeFinancialsInProposal && (
+                <p style={{ color: C.g500, fontSize: 10, fontFamily: fontSans, margin: "8px 0 0 0", lineHeight: 1.45 }}>
+                  Permissions starts on page 3 while Project Financials is included.
+                </p>
+              )}
             </div>
             <div style={{ position: "relative", borderRadius: 10, overflow: "hidden" }}>
             <div style={{ position: "relative" }}>
@@ -4443,7 +5157,7 @@ export default function JantaProposal({
                   <h2 style={{ margin: "0 0 4px 0", fontSize: 26, fontWeight: 700, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{custAddress || "Solar"} Proposal</h2>
                   {multiMeterMode && (
                     <p style={{ margin: "0 0 4px 0", color: C.gold, fontSize: 12, fontFamily: fontSans, fontWeight: 600 }}>
-                      {meters.length} meters · {effectiveSizeProject.toFixed(1)} kW combined
+                      {meters.length} meters · {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} combined
                     </p>
                   )}
                   <p style={{ margin: 0, color: proposalScreenDark ? "#D5C7B7" : "rgba(255,255,255,0.5)", fontSize: 12, fontFamily: fontSans }}>{new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}</p>
@@ -4460,7 +5174,7 @@ export default function JantaProposal({
                 </div>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 14 }}>
-                {[[`${formatKw(effectiveSizeProject)} kW`, multiMeterMode ? "Total System Size" : "System Size"], ["25+ Yrs", "Lifespan"], [formatArea(landReq), "Land Required"], [formatArea(landCons), "Land Conserved"]].map(([v, l]) => (
+                {[[formatSystemWithUnit(effectiveSizeProject, useMwDisplay), multiMeterMode ? "Total System Size" : "System Size"], ["25+ Yrs", "Lifespan"], [formatArea(landReq), "Land Required"], [formatArea(landCons), "Land Conserved"]].map(([v, l]) => (
                   <div key={l} style={{ background: "rgba(255,255,255,0.07)", borderRadius: 6, padding: "12px 10px", textAlign: "center" }}>
                     <div style={{ fontSize: 18, fontWeight: 700, color: C.gold }}>{v}</div>
                     <div style={{ fontSize: 9, color: "rgba(255,255,255,0.45)", fontFamily: fontSans, marginTop: 2 }}>{l}</div>
@@ -4486,7 +5200,7 @@ export default function JantaProposal({
                     {bundle.account ? <span style={{ fontWeight: 400, color: C.g500, fontSize: 11 }}> · Acct …{String(bundle.account).slice(-4)}</span> : null}
                   </h3>
                   <p style={{ margin: "0 0 6px 0", fontSize: 10, color: C.g500, fontFamily: fontSans }}>
-                    Meter {mi + 1} of {meterBundles.length} — individual production and usage
+                    Meter {mi + 1} of {meterBundles.length} — {productionOnlyMode ? "individual production" : "individual production and usage"}
                   </p>
                   {renderMeterChartsBlock(bundle, {
                     chartH,
@@ -4498,10 +5212,10 @@ export default function JantaProposal({
                   })}
                 </div>
               );
-              const pairChartH = compactFirstPageBundle ? 118 : 128;
-              const pairSeasonalH = compactFirstPageBundle ? 78 : 88;
-              const firstChartH = compactFirstPageBundle ? 88 : 98;
-              const firstSeasonalH = compactFirstPageBundle ? 58 : 66;
+              const pairChartH = compactFirstPageBundle ? 110 : 120;
+              const pairSeasonalH = compactFirstPageBundle ? 100 : 112;
+              const firstChartH = compactFirstPageBundle ? 82 : 92;
+              const firstSeasonalH = compactFirstPageBundle ? 96 : 108;
               const overviewRowPad = multiMeterMode && compactFirstPageBundle ? "7px 10px" : "10px 12px";
               const overviewIntroMb = multiMeterMode && compactFirstPageBundle ? 6 : 10;
               const overviewTitleMb = multiMeterMode && compactFirstPageBundle ? 6 : compactFirstPageBundle ? 10 : 14;
@@ -4509,55 +5223,60 @@ export default function JantaProposal({
               const projectOverviewBlock = (
                 <div style={{ background: C.white, borderRadius: 10, padding: firstPageSectionPad, border: `1px solid ${C.g200}` }}>
                   <h3 style={{ margin: `0 0 ${overviewTitleMb}px 0`, fontSize: compactFirstPageBundle ? 16 : 18, fontWeight: 700, color: titleColor }}>
-                    {multiMeterMode ? "Project Overview (All Meters Combined)" : proposalFinancialSectionTitle}
+                    {multiMeterMode
+                      ? (productionOnlyMode ? "Project Production (All Meters Combined)" : "Project Overview (All Meters Combined)")
+                      : proposalFinancialSectionTitle}
                   </h3>
                   {multiMeterMode && (
                     <p style={{ margin: `0 0 ${overviewIntroMb}px 0`, fontSize: 10, color: C.g500, fontFamily: fontSans, lineHeight: 1.4 }}>
-                      One combined system ({effectiveSizeProject.toFixed(1)} kW). Pricing and incentives apply to total project cost — not per meter.
+                      {productionOnlyMode
+                        ? `Combined ${formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} across ${meters.length} meters. Production figures only — no utility bill analysis.`
+                        : `One combined system (${formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}). Pricing and incentives apply to total project cost — not per meter.`}
                     </p>
                   )}
                   {[
-                    ...(multiMeterMode ? [["Total System Size", `${effectiveSizeProject.toFixed(1)} kW (${meters.length} meters)`]] : []),
-                    ...(includeUtilityBillEconomics ? [
+                    ...(multiMeterMode ? [["Total System Size", `${formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} (${meters.length} meters)`]] : []),
+                    ...(includeUtilityBillEconomics && savingsOnlyMode ? [
+                      ["25-Year Utility Savings", `$${Math.round(savings25).toLocaleString()}`],
+                      ["Usage Offset", `${offsetPct.toFixed(0)}%`],
+                    ] : []),
+                    ...(includeRoiMetrics ? [
                       ["25-Year Utility Savings", `$${Math.round(savings25).toLocaleString()}`],
                       ['Approximate "Break-Even"', `${breakEven} Years`],
                     ] : []),
-                    ["Janta Power's Capacity Factor", `${(effectiveCF * 100).toFixed(1)}%${samData ? " (NREL PVWatts)" : ` (${(reg.traditionalCF * 100).toFixed(1)}% for Traditional)`}`],
-                    ["Annual Energy Production", `${annualProd.toLocaleString()} kWh`],
-                    ...(includeUtilityBillEconomics ? [["Annual Return on Investment", `${roi.toFixed(1)}%`]] : []),
+                    ["Janta Power's Capacity Factor", `${(effectiveCF * 100).toFixed(1)}%${samData ? " (NREL PVWatts)" : ""} (${(traditionalCF * 100).toFixed(1)}% for Traditional Solar)`],
+                    ["Annual Energy Production", formatEnergyWithUnit(annualProd, useMwhDisplay)],
+                    ...(includeRoiMetrics ? [["Annual Return on Investment", `${roi.toFixed(1)}%`]] : []),
                   ].map(([k, v]) => (
                     <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: overviewRowPad, borderBottom: `1px solid ${C.g200}` }}>
                       <span style={{ color: C.g700, fontSize: multiMeterMode && compactFirstPageBundle ? 12 : 13 }}>{k}</span>
                       <span style={{ color: C.navy, fontSize: multiMeterMode && compactFirstPageBundle ? 12 : 13, fontWeight: 700, fontFamily: fontSans }}>{v}</span>
                     </div>
                   ))}
+                  {includeUtilityBillEconomics && savingsOnlyMode && (
+                    <p style={{ margin: `${overviewIntroMb}px 0 0 0`, fontSize: 9, color: C.g500, fontFamily: fontSans, lineHeight: 1.45 }}>
+                      25-year utility savings are estimated cumulative bill offsets at the effective rate above (defaults to $0.12/kWh if not provided). Offset % compares production to annual usage.
+                    </p>
+                  )}
                   {!multiMeterMode && (
                     <div style={{ marginTop: 22 }}>
                       <h4 style={{ margin: "0 0 10px 0", fontSize: compactFirstPageBundle ? 14 : 16, fontWeight: 700, color: titleColor }}>
-                        {hasMonthlyUsageData ? "Janta Power Comparative Analysis" : "Janta Power Month-Month Production"}
+                        {proposalProdChart.title}
                       </h4>
                       <BarChart
-                        data={monthlyProd}
-                        data2={hasMonthlyUsageData ? monthlyKWhNumeric : undefined}
-                        missingMask2={hasMonthlyUsageData ? usageMissingMask : undefined}
+                        {...proposalProdChart.chart}
                         missingBarColor={proposalScreenDark ? "#E85D5D" : "#D64545"}
                         labels={MONTHS}
-                        color1={chartProdColor}
-                        color2={chartUsageColor}
                         height={comparativeChartH}
                         showBarValues
-                        legend={
-                          hasMonthlyUsageData
-                            ? [
-                                { label: "Janta Energy Production (kWh)", color: chartProdColor },
-                                { label: "Current Energy Usage (kWh)", color: chartUsageColor },
-                                ...(usageMissingMask.some(Boolean)
-                                  ? [{ label: "Usage not provided", color: proposalScreenDark ? "#E85D5D" : "#D64545" }]
-                                  : []),
-                              ]
-                            : [{ label: "Janta Energy Production (kWh)", color: chartProdColor }]
-                        }
                       />
+                      <h4 style={{ margin: compactFirstPageBundle ? "14px 0 6px 0" : "18px 0 8px 0", fontSize: compactFirstPageBundle ? 14 : 16, fontWeight: 700, color: titleColor }}>
+                        Seasonal Production
+                      </h4>
+                      <p style={{ color: C.g500, fontSize: compactFirstPageBundle ? 10 : 11, fontFamily: fontSans, margin: "0 0 10px 0" }}>
+                        Average power (kW) by month for the {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} system{samData ? " — from NREL PVWatts" : ""}.
+                      </p>
+                      <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={seasonalChartH} title="" />
                     </div>
                   )}
                 </div>
@@ -4622,18 +5341,7 @@ export default function JantaProposal({
               return null;
             })()}
 
-            {!multiMeterMode ? (
-              <div style={{ background: C.white, borderRadius: 10, padding: firstPageSectionPad, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
-                <h3 style={{ margin: "0 0 6px 0", fontSize: compactFirstPageBundle ? 16 : 18, fontWeight: 700, color: titleColor }}>Seasonal Production</h3>
-                <p style={{ color: C.g500, fontSize: compactFirstPageBundle ? 10 : 11, fontFamily: fontSans, margin: "0 0 10px 0" }}>
-                  Average power (kW) by month for the {formatKw(effectiveSizeProject)} kW system{samData ? " — from NREL PVWatts" : ""}.
-                </p>
-                <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={seasonalChartH} title="" />
-              </div>
-            ) : null}
-
             <div style={{ breakBefore: "page", pageBreakBefore: "always", breakInside: "avoid", pageBreakInside: "avoid", display: "flex", flexDirection: "column", gap: compactPageTwoCosts ? 8 : 12 }}>
-              {/* System Costs */}
               {renderSystemCostsSection(true, compactPageTwoCosts)}
 
             {includeFinancialsInProposal && (
@@ -4701,7 +5409,7 @@ export default function JantaProposal({
             )}
 
             {/* 25yr Table */}
-            {includeUtilityBillEconomics && (
+            {includeRoiMetrics && (
               <div style={{ background: C.white, borderRadius: 10, padding: compact25yrPdf ? 14 : 24, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
                 <h3 style={{ margin: compact25yrPdf ? "0 0 8px 0" : "0 0 12px 0", fontSize: compact25yrPdf ? 14 : 15, fontWeight: 700, color: titleColor }}>25-Year Projection</h3>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: compact25yrPdf ? 10 : 11, fontFamily: fontSans }}>
@@ -4762,7 +5470,6 @@ export default function JantaProposal({
                     <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: compactPageTwoFlow ? 11 : 13, fontWeight: 700, marginBottom: compactPageTwoFlow ? 3 : 5 }}>Signature:</div>
                     <div style={{ borderBottom: `1px solid ${C.g300}`, height: compactPageTwoFlow ? 28 : 40, marginBottom: compactPageTwoFlow ? 5 : 7, display: "flex", alignItems: "flex-end" }}>
                       <img
-                        crossOrigin="anonymous"
                         src={jantaPublicAssetUrl("/assets/adam-boudissa-signature-new.png")}
                         alt="Adam Boudissa signature"
                         style={{
@@ -4771,7 +5478,7 @@ export default function JantaProposal({
                           objectFit: "contain",
                           imageRendering: "auto",
                           WebkitFontSmoothing: "antialiased",
-                          filter: proposalScreenDark || pdfLightMode ? "none" : "invert(1)",
+                          filter: proposalScreenDark ? "none" : "invert(1)",
                           mixBlendMode: "normal",
                           background: "transparent",
                         }}
@@ -4783,8 +5490,8 @@ export default function JantaProposal({
                   <div>
                     <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: compactPageTwoFlow ? 11 : 13, fontWeight: 700, marginBottom: compactPageTwoFlow ? 3 : 5 }}>Signature:</div>
                     <div style={{ borderBottom: `1px solid ${C.g300}`, height: compactPageTwoFlow ? 28 : 40, marginBottom: compactPageTwoFlow ? 5 : 7 }} />
-                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: compactPageTwoFlow ? 11 : 13, fontWeight: 700 }}>Printed Name:</div>
-                    <div style={{ borderBottom: `1px solid ${C.g300}`, height: compactPageTwoFlow ? 14 : 24 }} />
+                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: compactPageTwoFlow ? 11 : 13, fontWeight: 700, marginBottom: compactPageTwoFlow ? 3 : 5 }}>Printed Name:</div>
+                    <div style={{ borderBottom: `1px solid ${C.g300}`, height: compactPageTwoFlow ? 28 : 40 }} />
                   </div>
                 </div>
               </div>

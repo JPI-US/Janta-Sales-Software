@@ -1,9 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import JantaProposal from "../janta-proposal-generator-v3 (1).jsx";
 import ProposalsLibrary from "./ProposalsLibrary.jsx";
-import { getProposalCloud } from "./proposalsCloudApi.js";
+import { getProposalForUser } from "./proposalStorage.js";
 import { SNAPSHOT_VERSION } from "./proposalSnapshot.js";
-import { clearSessionDraft, deriveProposalTitle, saveProposal } from "./proposalStorage.js";
+import { newProposalId } from "./proposalIds.js";
+import {
+  clearSessionDraft,
+  deriveProposalTitle,
+  migrateLegacyProposalAccount,
+  proposalStorageKey,
+  saveProposal,
+} from "./proposalStorage.js";
 
 const NAV_SESSION_PREFIX = "janta_app_nav_v1_";
 
@@ -47,7 +54,8 @@ export default function ProposalApp({
   initialDarkMode,
   onDarkModeChange,
 }) {
-  const savedNav = useRef(readNavState(currentUser.id)).current;
+  const accountKey = proposalStorageKey(currentUser);
+  const savedNav = useRef(readNavState(accountKey)).current;
   const [view, setView] = useState(savedNav?.view === "editor" ? "editor" : "library");
   const [editorKey, setEditorKey] = useState(0);
   const [appDarkMode, setAppDarkMode] = useState(Boolean(initialDarkMode));
@@ -62,17 +70,26 @@ export default function ProposalApp({
     Boolean(savedNav?.view === "editor" && savedNav?.proposalId)
   );
   const restoreStarted = useRef(false);
+  const creatingProposal = useRef(false);
+  const autosaveInFlight = useRef(null);
+  const activeProposalRef = useRef(activeProposal);
+  activeProposalRef.current = activeProposal;
 
   const persistNav = useCallback(
     (nextView, proposal = activeProposal) => {
-      writeNavState(currentUser.id, {
+      writeNavState(accountKey, {
         view: nextView,
         proposalId: proposal?.id || null,
         proposalTitle: proposal?.title || "",
       });
     },
-    [currentUser.id, activeProposal]
+    [accountKey, activeProposal]
   );
+
+  useEffect(() => {
+    if (!accountKey) return;
+    migrateLegacyProposalAccount(accountKey, currentUser.id).catch(() => {});
+  }, [accountKey, currentUser.id]);
 
   useEffect(() => {
     if (restoreStarted.current) return;
@@ -84,10 +101,10 @@ export default function ProposalApp({
     let cancelled = false;
     (async () => {
       try {
-        const record = await getProposalCloud(currentUser.id, savedNav.proposalId);
+        const record = await getProposalForUser(accountKey, savedNav.proposalId);
         if (cancelled || !record) {
           setView("library");
-          writeNavState(currentUser.id, { view: "library", proposalId: null, proposalTitle: "" });
+          writeNavState(accountKey, { view: "library", proposalId: null, proposalTitle: "" });
           return;
         }
         setActiveProposal({
@@ -106,7 +123,7 @@ export default function ProposalApp({
     return () => {
       cancelled = true;
     };
-  }, [currentUser.id, savedNav?.proposalId, savedNav?.view]);
+  }, [accountKey, savedNav?.proposalId, savedNav?.view]);
 
   const openLibrary = useCallback(() => {
     setAutoDownloadPdf(false);
@@ -137,14 +154,19 @@ export default function ProposalApp({
   );
 
   const startNewProposal = useCallback(async () => {
+    if (creatingProposal.current) return;
+    creatingProposal.current = true;
     try {
       const snapshot = emptyEditorSnapshot();
+      const newId = newProposalId();
       const created = await saveProposal({
-        userId: currentUser.id,
+        userId: accountKey,
+        id: newId,
         snapshot,
         title: deriveProposalTitle(snapshot),
+        userEmail: currentUser.email,
       });
-      await clearSessionDraft(currentUser.id);
+      await clearSessionDraft(accountKey);
       const next = {
         id: created.id,
         title: created.title,
@@ -156,29 +178,44 @@ export default function ProposalApp({
       persistNav("editor", next);
     } catch (err) {
       window.alert(err.message || "Could not create proposal. Is the cloud API running?");
+    } finally {
+      creatingProposal.current = false;
     }
-  }, [currentUser.id, persistNav]);
+  }, [accountKey, currentUser.email, persistNav]);
 
   const handleAutosave = useCallback(
     async ({ snapshot }) => {
-      if (!activeProposal.id) return null;
-      const title = deriveProposalTitle(snapshot) || activeProposal.title;
-      const saved = await saveProposal({
-        userId: currentUser.id,
-        id: activeProposal.id,
-        title,
-        snapshot,
-      });
-      const next = {
-        id: saved.id,
-        title: saved.title,
-        snapshot: saved.snapshot,
-      };
-      setActiveProposal(next);
-      if (view === "editor") persistNav("editor", next);
-      return saved;
+      const { id, title } = activeProposalRef.current;
+      if (!id) return null;
+      if (autosaveInFlight.current) return autosaveInFlight.current;
+
+      const run = (async () => {
+        const nextTitle = deriveProposalTitle(snapshot) || title;
+        const saved = await saveProposal({
+          userId: accountKey,
+          id,
+          title: nextTitle,
+          snapshot,
+          userEmail: currentUser.email,
+        });
+        const next = {
+          id: saved.id,
+          title: saved.title,
+          snapshot: saved.snapshot,
+        };
+        setActiveProposal(next);
+        if (view === "editor") persistNav("editor", next);
+        return saved;
+      })();
+
+      autosaveInFlight.current = run;
+      try {
+        return await run;
+      } finally {
+        if (autosaveInFlight.current === run) autosaveInFlight.current = null;
+      }
     },
-    [activeProposal.id, activeProposal.title, currentUser.id, view, persistNav]
+    [accountKey, currentUser.email, view, persistNav]
   );
 
   if (restoring) {
@@ -203,7 +240,7 @@ export default function ProposalApp({
     return (
       <ProposalsLibrary
         key={libraryKey}
-        userId={currentUser.id}
+        userId={accountKey}
         userName={currentUser.name}
         userEmail={currentUser.email}
         isDark={appDarkMode}
@@ -224,7 +261,7 @@ export default function ProposalApp({
   return (
     <JantaProposal
       key={editorKey}
-      currentUserId={currentUser.id}
+      currentUserId={accountKey}
       initialSnapshot={activeProposal.snapshot}
       savedProposalId={activeProposal.id}
       savedProposalTitle={activeProposal.title}

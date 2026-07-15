@@ -1,4 +1,5 @@
 import http from "http";
+import "./loadEnv.js";
 import { createProposalsApiHandler, DEFAULT_DATA_DIR } from "./proposalsApi.js";
 
 const port = Number(process.env.PORT || 3001);

@@ -27,20 +27,31 @@ export async function getProposalCloud(userId, proposalId) {
   return data.proposal;
 }
 
-export async function createProposalCloud(userId, { title, snapshot, status }) {
+export async function createProposalCloud(userId, { id, title, snapshot, status, userEmail }) {
   const data = await request(`/api/users/${encodeURIComponent(userId)}/proposals`, {
     method: "POST",
-    body: JSON.stringify({ title, snapshot, status }),
+    body: JSON.stringify({ id, title, snapshot, status, userEmail }),
   });
   return data.proposal;
 }
 
-export async function updateProposalCloud(userId, proposalId, { title, snapshot, status }) {
+export async function upsertProposalCloud(userId, { id, title, snapshot, status, userEmail }) {
+  if (!id) throw new Error("proposal id is required");
+  try {
+    return await updateProposalCloud(userId, id, { title, snapshot, status, userEmail });
+  } catch (err) {
+    const msg = String(err?.message || "");
+    if (!msg.includes("404") && !msg.toLowerCase().includes("not found")) throw err;
+    return createProposalCloud(userId, { id, title, snapshot, status, userEmail });
+  }
+}
+
+export async function updateProposalCloud(userId, proposalId, { title, snapshot, status, userEmail }) {
   const data = await request(
     `/api/users/${encodeURIComponent(userId)}/proposals/${encodeURIComponent(proposalId)}`,
     {
       method: "PUT",
-      body: JSON.stringify({ title, snapshot, status }),
+      body: JSON.stringify({ title, snapshot, status, userEmail }),
     }
   );
   return data.proposal;

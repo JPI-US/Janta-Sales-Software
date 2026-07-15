@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to hubspot.config.json and paste your deal stage IDs from HubSpot (Settings → Objects → Deals → Pipelines).",
+  "statusToStage": {
+    "in_progress": "",
+    "ready": "",
+    "sent": "",
+    "closed": ""
+  },
+  "stageToStatus": {
+  }
+}
