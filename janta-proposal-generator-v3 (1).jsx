@@ -1,6 +1,11 @@
 import { useState, useEffect, useMemo, useRef, useId } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { applyProposalSnapshot, buildProposalSnapshot } from "./src/jantaProposalPersistence.js";
+import SiteMapEditor from "./src/SiteMapEditor.jsx";
+import SiteMapPreview from "./src/SiteMapPreview.jsx";
+import { bakeSiteMapToDataUrl } from "./src/siteMapBake.js";
+import { createEmptySiteMap, normalizeSiteMap, siteMapHasLayout } from "./src/siteMapModel.js";
+import { geocodeSiteAddress } from "./src/siteMapGeocode.js";
 import {
   activeEquipmentItems,
   collapseEquipmentForStorage,
@@ -859,17 +864,8 @@ async function fetchPVWatts(apiKey, lat, lon, systemCapacityKw = 1, options = {}
 
 // ─── Geocode address to lat/lon (OpenStreetMap Nominatim) ────────────
 async function geocodeAddress(address) {
-  const q = encodeURIComponent(address.trim());
-  const res = await fetch(
-    `https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1`,
-    { headers: { "Accept-Language": "en", "User-Agent": "JantaProposalGenerator/1.0" } }
-  );
-  const data = await res.json();
-  if (!Array.isArray(data) || data.length === 0) {
-    throw new Error("Address not found. Try including city and state.");
-  }
-  const { lat, lon } = data[0];
-  return { lat: parseFloat(lat), lon: parseFloat(lon) };
+  const hit = await geocodeSiteAddress(address);
+  return { lat: hit.lat, lon: hit.lng };
 }
 
 async function reverseGeocodeCountyState(lat, lon) {
@@ -1320,15 +1316,18 @@ function Field({ label, value, onChange, type = "text", unit, placeholder, disab
   );
 }
 
-function Metric({ label, value, sub, color = C.navy, highlight }) {
+function Metric({ label, value, sub, color = C.navy, highlight, typeScale }) {
+  const labelSize = typeScale?.label ?? 9;
+  const valueSize = typeScale?.metric ?? 20;
+  const subSize = typeScale?.label ?? 10;
   return (
     <div style={{
       background: highlight ? `${color}12` : C.cream, borderRadius: 12, padding: "12px 14px",
       flex: 1, minWidth: 100, border: `1px solid ${highlight ? color + "22" : C.g200}`,
     }}>
-      <div style={{ color: C.g500, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 2, fontFamily: fontSans }}>{label}</div>
-      <div style={{ color, fontSize: 20, fontWeight: 700, fontFamily: fontSerif, lineHeight: 1.1 }}>{value}</div>
-      {sub && <div style={{ color: C.g500, fontSize: 10, marginTop: 1, fontFamily: fontSans }}>{sub}</div>}
+      <div style={{ color: C.g500, fontSize: labelSize, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 2, fontFamily: fontSans }}>{label}</div>
+      <div style={{ color, fontSize: valueSize, fontWeight: 700, fontFamily: fontSerif, lineHeight: 1.1 }}>{value}</div>
+      {sub && <div style={{ color: C.g500, fontSize: subSize, marginTop: 1, fontFamily: fontSans }}>{sub}</div>}
     </div>
   );
 }
@@ -1760,6 +1759,9 @@ export default function JantaProposal({
   const [siteAddress, setSiteAddress] = useState("");
   const [siteLat, setSiteLat] = useState(null);
   const [siteLon, setSiteLon] = useState(null);
+  const [siteMap, setSiteMap] = useState(() => createEmptySiteMap());
+  /** When true, Site address field was edited manually and should not follow site map. */
+  const siteAddressManualRef = useRef(false);
   const [geocodeLoading, setGeocodeLoading] = useState(false);
   const [geocodeError, setGeocodeError] = useState(null);
   // SAM/PVWatts parameters (match SAM: tilt 60°, azimuthal axis, DC:AC 1.0, losses 2%)
@@ -1864,6 +1866,7 @@ export default function JantaProposal({
     siteAddress,
     siteLat,
     siteLon,
+    siteMap,
     samTilt,
     samAzimuth,
     samArrayType,
@@ -1937,6 +1940,10 @@ export default function JantaProposal({
       setSiteAddress,
       setSiteLat,
       setSiteLon,
+      setSiteMap,
+      markSiteAddressManual: (manual) => {
+        siteAddressManualRef.current = Boolean(manual);
+      },
       setSamTilt,
       setSamAzimuth,
       setSamArrayType,
@@ -2168,6 +2175,7 @@ export default function JantaProposal({
       setGeocodeError("Enter an address first.");
       return;
     }
+    siteAddressManualRef.current = true;
     setGeocodeLoading(true);
     setGeocodeError(null);
     geocodeAddress(siteAddress)
@@ -2183,6 +2191,19 @@ export default function JantaProposal({
       })
       .finally(() => setGeocodeLoading(false));
   }
+
+  // Site map address is canonical — keep Service Address + SAM site address in sync.
+  useEffect(() => {
+    const fromMap = String(siteMap?.address || "").trim();
+    if (!fromMap) return;
+    siteAddressManualRef.current = false;
+    setSiteAddress((prev) => (String(prev || "").trim() === fromMap ? prev : fromMap));
+    setCustAddress((prev) => (String(prev || "").trim() === fromMap ? prev : fromMap));
+    if (Number.isFinite(Number(siteMap?.lat)) && Number.isFinite(Number(siteMap?.lng))) {
+      setSiteLat((prev) => (prev === siteMap.lat ? prev : siteMap.lat));
+      setSiteLon((prev) => (prev === siteMap.lng ? prev : siteMap.lng));
+    }
+  }, [siteMap?.address, siteMap?.lat, siteMap?.lng]);
 
   function applyBillCustomerFields(d) {
     if (d.customerName) setCustName(d.customerName);
@@ -2301,6 +2322,22 @@ export default function JantaProposal({
       });
       await new Promise((resolve) => requestAnimationFrame(resolve));
       await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      // Bake interactive Leaflet map → static PNG before PDF capture (never ship live map DOM).
+      if (siteMapHasLayout(siteMap)) {
+        try {
+          const baked = await bakeSiteMapToDataUrl(siteMap);
+          if (baked) {
+            flushSync(() => {
+              setSiteMap((prev) => normalizeSiteMap({ ...prev, bakedImageDataUrl: baked }));
+            });
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+          }
+        } catch (bakeErr) {
+          console.warn("Site map bake failed; PDF will omit map section.", bakeErr);
+        }
+      }
 
       await waitForImages(el);
       revertRaster = await rasterizeImagesForHtml2Pdf(el);
@@ -3057,7 +3094,7 @@ export default function JantaProposal({
         }
       });
     };
-  }, [step, includeFinancialsInProposal, includeCapitalLessSavedLand, includeUtilityBillEconomics, includeRoiMetrics, productionOnlyMode, usageComparisonMode, savingsOnlyMode, pdfExporting, startPermissionsOnNewPage, multiMeterMode, meters.length, meterBundles.length]);
+  }, [step, includeFinancialsInProposal, includeCapitalLessSavedLand, includeUtilityBillEconomics, includeRoiMetrics, productionOnlyMode, usageComparisonMode, savingsOnlyMode, pdfExporting, startPermissionsOnNewPage, multiMeterMode, meters.length, meterBundles.length, siteMap?.bakedImageDataUrl, siteMap?.lat, siteMap?.lng, siteMap?.towers?.length]);
   // Excel-based land model:
   // Space Required by Janta (acres) = (X MW * 1000) / 450
   // Space Required by Fixed Tilt (acres) = (X MW * 1000) / 150
@@ -3141,13 +3178,22 @@ export default function JantaProposal({
   ];
 
   const pdfAvoid = { breakInside: "avoid", pageBreakInside: "avoid" };
-  const renderSystemCostsSection = (pdfMode, compactMode = false) => {
+  const renderSystemCostsSection = (pdfMode, compactMode = false, typeScale = null, append = null) => {
     const avoid = pdfMode ? pdfAvoid : {};
-    const pad = pdfMode ? (compactMode ? 12 : 24) : 20;
-    const h3Size = pdfMode ? (compactMode ? 14 : 16) : 15;
-    const h3Mb = pdfMode && compactMode ? 10 : 14;
-    const blockPad = pdfMode && compactMode ? 8 : 12;
-    const blockGap = pdfMode && compactMode ? 8 : 12;
+    const pad = pdfMode ? 18 : 20;
+    const T = typeScale || {
+      section: pdfMode ? (compactMode ? 14 : 16) : 15,
+      subsection: 14,
+      body: 13,
+      bodySm: 12,
+      caption: 11,
+      label: 10,
+      coverStat: 18,
+    };
+    const h3Size = T.section;
+    const h3Mb = 10;
+    const blockPad = compactMode && pdfMode ? 10 : 12;
+    const blockGap = 12;
     const title = pdfMode ? "System Costs" : "System Costs (Preview)";
     const summaryDark = darkThemeActive && (!pdfMode || proposalScreenDark);
     const showcasePy = 8;
@@ -3156,7 +3202,7 @@ export default function JantaProposal({
     const showcaseNetBoxBg = summaryDark ? "#1A3044" : "#E8F2F8";
     const showcaseNetBoxBorder = summaryDark ? "#3D6280" : "#B8D4E8";
     const showcasePerW = (perW, color = C.navy) => (
-      <div style={{ textAlign: "right", color, fontWeight: 600, fontSize: 14, lineHeight: 1, fontFamily: fontSans }}>{perW}</div>
+      <div style={{ textAlign: "right", color, fontWeight: 600, fontSize: T.subsection, lineHeight: 1, fontFamily: fontSans }}>{perW}</div>
     );
     const showcaseCostRow = (label, perW, color, borderTop = false, key) => (
       <div
@@ -3170,14 +3216,14 @@ export default function JantaProposal({
           borderTop: borderTop ? `1px solid ${C.g200}` : undefined,
         }}
       >
-        <span style={{ color: C.g500, fontSize: 11 }}>{label}</span>
+        <span style={{ color: C.g500, fontSize: T.caption }}>{label}</span>
         {showcasePerW(perW, color)}
       </div>
     );
     const equipmentList =
       (batteryAdd > 0 || generatorAdd > 0) && (
         <div style={{ marginTop: blockGap, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: blockPad, ...avoid }}>
-          <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
+          <div style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
             Battery & Generator
           </div>
           {[...batteryEquipment, ...generatorEquipment].map((item, i, rows) => (
@@ -3189,7 +3235,7 @@ export default function JantaProposal({
                 alignItems: "center",
                 padding: "6px 0",
                 borderBottom: i < rows.length - 1 ? `1px dashed ${C.g200}` : "none",
-                fontSize: 12,
+                fontSize: T.bodySm,
               }}
             >
               <span style={{ color: C.g700 }}>{formatEquipmentLabel(item)}</span>
@@ -3208,7 +3254,7 @@ export default function JantaProposal({
           ...avoid,
         }}
       >
-        <h3 style={{ margin: `0 0 ${h3Mb}px 0`, fontSize: h3Size, fontWeight: 700, color: titleColor }}>{title}</h3>
+        <h3 style={{ margin: `0 0 ${h3Mb}px 0`, fontSize: h3Size, fontWeight: 700, color: titleColor, fontFamily: fontSans }}>{title}</h3>
 
         {salesShowcaseMode ? (
           <>
@@ -3221,8 +3267,8 @@ export default function JantaProposal({
                   padding: showcaseRowPad,
                 }}
               >
-                <span style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>Solar PV</span>
-                <span style={{ color: C.navy, fontWeight: 700, fontFamily: fontSans, fontSize: 12 }}>{formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}</span>
+                <span style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>Solar PV</span>
+                <span style={{ color: C.navy, fontWeight: 700, fontFamily: fontSans, fontSize: T.bodySm }}>{formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}</span>
               </div>
               <div style={{ fontFamily: fontSans }}>
                 {showcaseCostRow("Gross", grossPerWDisplay, C.navy, true)}
@@ -3243,29 +3289,29 @@ export default function JantaProposal({
 
             <div style={{ marginTop: blockGap, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: pdfMode && compactMode ? 6 : 8, ...avoid }}>
               <div style={{ background: summaryDark ? "#22180F" : C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Project gross</div>
-                <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: 18, lineHeight: 1.15 }}>
+                <div style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>Project gross</div>
+                <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.coverStat, lineHeight: 1.15 }}>
                   {projectGrossPerWDisplay}
                 </div>
-                <div style={{ color: C.g500, fontSize: 10, fontFamily: fontSans, marginTop: 3 }}>{grossCostDisplay}</div>
+                <div style={{ color: C.g500, fontSize: T.label, fontFamily: fontSans, marginTop: 3 }}>{grossCostDisplay}</div>
               </div>
               <div style={{ background: summaryDark ? "#1A2A1F" : "#EEF8F0", border: `1px solid ${summaryDark ? "#2D4A38" : "#C8E6CF"}`, borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ color: summaryDark ? "#8FB89A" : C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>
+                <div style={{ color: summaryDark ? "#8FB89A" : C.g500, fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>
                   Incentives
                 </div>
-                <div style={{ color: C.green, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: 18, lineHeight: 1 }}>
+                <div style={{ color: C.green, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.coverStat, lineHeight: 1 }}>
                   {incentivePerWDisplay}
                 </div>
-                <div style={{ color: summaryDark ? "#8FB89A" : C.g500, fontSize: 10, fontFamily: fontSans, marginTop: 2 }}>
+                <div style={{ color: summaryDark ? "#8FB89A" : C.g500, fontSize: T.label, fontFamily: fontSans, marginTop: 2 }}>
                   {totalCreditsDisplay}
                 </div>
               </div>
               <div style={{ background: showcaseNetBoxBg, border: `1px solid ${showcaseNetBoxBorder}`, borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ color: summaryDark ? "#8FB0C8" : C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Project net</div>
-                <div style={{ color: showcaseNetColor, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: 18, lineHeight: 1.15 }}>
+                <div style={{ color: summaryDark ? "#8FB0C8" : C.g500, fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>Project net</div>
+                <div style={{ color: showcaseNetColor, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.coverStat, lineHeight: 1.15 }}>
                   {projectNetPerWDisplay}
                 </div>
-                <div style={{ color: summaryDark ? "#8FB0C8" : C.g500, fontSize: 10, fontFamily: fontSans, marginTop: 3 }}>
+                <div style={{ color: summaryDark ? "#8FB0C8" : C.g500, fontSize: T.label, fontFamily: fontSans, marginTop: 3 }}>
                   {netCostDisplay}
                 </div>
               </div>
@@ -3274,10 +3320,10 @@ export default function JantaProposal({
         ) : (
           <>
             <div style={{ background: C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: blockPad, ...avoid }}>
-              <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: pdfMode && compactMode ? 6 : 8 }}>
+              <div style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: pdfMode && compactMode ? 6 : 8 }}>
                 Base System Price
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, fontFamily: fontSans }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: T.bodySm, fontFamily: fontSans }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ color: C.g500 }}>{multiMeterMode && meterBundles.length > 0 ? "Total system size" : "System Size"}</span>
                   <span style={{ color: C.navy, fontWeight: 700 }}>{formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}</span>
@@ -3296,14 +3342,14 @@ export default function JantaProposal({
             {equipmentList}
 
             <div style={{ marginTop: blockGap, background: C.white, border: `1px solid ${C.g200}`, borderRadius: 8, padding: blockPad, ...avoid }}>
-              <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
+              <div style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans, marginBottom: 8 }}>
                 Applied Credits & Incentives
               </div>
               {activeCreditItems.length === 0 ? (
-                <div style={{ color: C.g500, fontSize: 12, fontFamily: fontSans }}>No credits currently applied.</div>
+                <div style={{ color: C.g500, fontSize: T.bodySm, fontFamily: fontSans }}>No credits currently applied.</div>
               ) : (
                 activeCreditItems.map((item, i) => (
-                  <div key={`${item.key}-${i}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: i < activeCreditItems.length - 1 ? `1px dashed ${C.g200}` : "none", fontSize: 12 }}>
+                  <div key={`${item.key}-${i}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: i < activeCreditItems.length - 1 ? `1px dashed ${C.g200}` : "none", fontSize: T.bodySm }}>
                     <span style={{ color: C.g700 }}>{item.detailLabel}</span>
                     <span style={{ color: C.green, fontFamily: fontSans, fontWeight: 700 }}>{item.displayAmount || formatUsd(item.amount)}</span>
                   </div>
@@ -3313,20 +3359,21 @@ export default function JantaProposal({
 
             <div style={{ marginTop: blockGap, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: pdfMode && compactMode ? 6 : 8, ...avoid }}>
               <div style={{ background: summaryDark ? "#22180F" : C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Gross</div>
-                <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>{grossCostDisplay}</div>
+                <div style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>Gross</div>
+                <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.body }}>{grossCostDisplay}</div>
               </div>
               <div style={{ background: summaryDark ? "#1E2A20" : "#ECF8F5", border: summaryDark ? `1px solid ${C.g200}` : "1px solid #CBECE4", borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ color: C.g500, fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Credits</div>
-                <div style={{ color: C.green, fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>{totalCreditsDisplay}</div>
+                <div style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>Credits</div>
+                <div style={{ color: C.green, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.body }}>{totalCreditsDisplay}</div>
               </div>
               <div style={{ background: summaryDark ? C.gold : C.navy, border: `1px solid ${summaryDark ? C.goldLight : C.navy}`, borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ color: summaryDark ? "#3A2A15" : "rgba(255,255,255,0.7)", fontSize: 10, textTransform: "uppercase", fontFamily: fontSans }}>Net Cost</div>
-                <div style={{ color: summaryDark ? "#1D130A" : "#F8F2E8", fontWeight: 700, fontFamily: fontSans, marginTop: 2 }}>{netCostDisplay}</div>
+                <div style={{ color: summaryDark ? "#3A2A15" : "rgba(255,255,255,0.7)", fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>Net Cost</div>
+                <div style={{ color: summaryDark ? "#1D130A" : "#F8F2E8", fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.body }}>{netCostDisplay}</div>
               </div>
             </div>
           </>
         )}
+        {append}
       </div>
     );
     if (pdfMode) return inner;
@@ -3355,9 +3402,21 @@ export default function JantaProposal({
     );
   };
 
-  const renderMeterChartsBlock = (bundle, { chartH = 155, seasonalH = 155, compact = false, forPdf = false, pairPage = false, firstPageMeter = false } = {}) => {
+  const renderMeterChartsBlock = (bundle, { chartH = 155, seasonalH = 155, compact = false, forPdf = false, pairPage = false, firstPageMeter = false, typeScale = null } = {}) => {
     const meterHasUsage = bundle.hasMonthlyUsageData;
     const screenDark = forPdf ? false : proposalScreenDark;
+    const T = typeScale || {
+      section: compact ? 14 : 16,
+      subsection: 14,
+      body: 13,
+      bodySm: 12,
+      caption: 11,
+      label: 10,
+      metric: 20,
+    };
+    const chartTitleSize = forPdf ? T.subsection : (compact ? 14 : 16);
+    const seasonalTitleSize = forPdf ? T.subsection : (compact ? 14 : 16);
+    const captionSize = forPdf ? T.caption : (compact ? 10 : 11);
     const prodChart = buildProductionChartConfig({
       salesShowcase: salesShowcaseMode,
       hasUsage: meterHasUsage,
@@ -3372,16 +3431,16 @@ export default function JantaProposal({
       screenDark,
       useMwh: useMwhDisplay,
     });
-    const metricsGap = forPdf ? (firstPageMeter ? 6 : pairPage ? 8 : compact ? 14 : 22) : (compact ? 8 : 12);
-    const chartTopGap = forPdf ? (firstPageMeter ? 2 : pairPage ? 4 : compact ? 6 : 8) : 0;
+    const metricsGap = forPdf ? (firstPageMeter ? 10 : pairPage ? 12 : 14) : (compact ? 8 : 12);
+    const metricScale = forPdf ? typeScale : null;
     return (
       <>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: metricsGap }}>
-          <Metric label="System size" value={formatSystemKw(bundle.effectiveSize, useMwDisplay)} sub={systemUnitLabel(useMwDisplay)} highlight />
-          <Metric label="Annual production" value={formatEnergyKwh(bundle.annualProd, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay, { perYear: true })} color={C.blue} highlight />
-          {meterHasUsage && <Metric label="Annual usage" value={formatEnergyKwh(bundle.annualKWh, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay, { perYear: true })} />}
+          <Metric label="System size" value={formatSystemKw(bundle.effectiveSize, useMwDisplay)} sub={systemUnitLabel(useMwDisplay)} highlight typeScale={metricScale} />
+          <Metric label="Annual production" value={formatEnergyKwh(bundle.annualProd, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay, { perYear: true })} color={C.blue} highlight typeScale={metricScale} />
+          {meterHasUsage && <Metric label="Annual usage" value={formatEnergyKwh(bundle.annualKWh, useMwhDisplay)} sub={energyUnitLabel(useMwhDisplay, { perYear: true })} typeScale={metricScale} />}
         </div>
-        <h4 style={{ margin: `${chartTopGap}px 0 ${compact ? 8 : 10}px 0`, fontSize: compact ? 14 : 16, fontWeight: 700, color: titleColor }}>{prodChart.title}</h4>
+        <h4 style={{ margin: "0 0 10px 0", fontSize: chartTitleSize, fontWeight: 700, color: titleColor, fontFamily: fontSans }}>{prodChart.title}</h4>
         <BarChart
           {...prodChart.chart}
           missingBarColor={screenDark ? "#E85D5D" : "#D64545"}
@@ -3389,8 +3448,8 @@ export default function JantaProposal({
           height={chartH}
           showBarValues={forPdf}
         />
-        <h4 style={{ margin: firstPageMeter ? "6px 0 3px 0" : pairPage ? "8px 0 4px 0" : compact ? "12px 0 6px 0" : "16px 0 6px 0", fontSize: firstPageMeter ? 12 : compact || pairPage ? 13 : 16, fontWeight: 700, color: titleColor }}>Seasonal Production</h4>
-        <p style={{ color: C.g500, fontSize: firstPageMeter ? 9 : pairPage ? 9 : compact ? 10 : 11, fontFamily: fontSans, margin: firstPageMeter ? "0 0 4px 0" : pairPage ? "0 0 6px 0" : "0 0 10px 0" }}>
+        <h4 style={{ margin: "18px 0 8px 0", fontSize: seasonalTitleSize, fontWeight: 700, color: titleColor, fontFamily: fontSans }}>Seasonal Production</h4>
+        <p style={{ color: C.g500, fontSize: captionSize, fontFamily: fontSans, margin: "0 0 10px 0", lineHeight: 1.45 }}>
           Average power (kW) by month for the {formatSystemWithUnit(bundle.effectiveSize, useMwDisplay)} system{samData ? " — from NREL PVWatts" : ""}.
         </p>
         <SeasonalChart
@@ -4139,8 +4198,22 @@ export default function JantaProposal({
                       <div style={{ marginTop: 6 }}>
                         <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.05em", fontFamily: fontSans }}>Site address</label>
                         <div style={{ display: "flex", gap: 6 }}>
-                          <input value={siteAddress} onChange={e => { setSiteAddress(e.target.value); setGeocodeError(null); }} placeholder="Street, city, state ZIP" style={{ flex: 1, padding: "7px 10px", border: `1px solid ${C.g200}`, borderRadius: 5, fontSize: 13, fontFamily: fontSans }} />
+                          <input
+                            value={siteAddress}
+                            onChange={(e) => {
+                              const next = e.target.value;
+                              // Emptying the field resumes following the site map address.
+                              siteAddressManualRef.current = Boolean(next.trim());
+                              setSiteAddress(next);
+                              setGeocodeError(null);
+                            }}
+                            placeholder="Street, city, state ZIP"
+                            style={{ flex: 1, padding: "7px 10px", border: `1px solid ${C.g200}`, borderRadius: 5, fontSize: 13, fontFamily: fontSans }}
+                          />
                           <button type="button" onClick={handleGeocode} disabled={geocodeLoading || !siteAddress?.trim()} style={{ padding: "7px 12px", background: siteAddress?.trim() && !geocodeLoading ? C.navy : C.g300, color: "#F8F2E8", border: "none", borderRadius: 5, fontSize: 12, fontFamily: fontSans, cursor: siteAddress?.trim() && !geocodeLoading ? "pointer" : "default", flexShrink: 0 }}>{geocodeLoading ? "…" : "Geocode"}</button>
+                        </div>
+                        <div style={{ fontSize: 9, color: C.g500, fontFamily: fontSans, marginTop: 3 }}>
+                          Follows the site map address (also updates Service Address).
                         </div>
                         {siteLat != null && siteLon != null && <div style={{ fontSize: 10, color: C.green, fontFamily: fontSans, marginTop: 3 }}>{siteLat.toFixed(4)}°, {siteLon.toFixed(4)}°</div>}
                         {geocodeError && <div style={{ fontSize: 10, color: C.red, fontFamily: fontSans, marginTop: 3 }}>{geocodeError}</div>}
@@ -4538,6 +4611,34 @@ export default function JantaProposal({
                   </datalist>
                 </div>
               </div>
+
+            <SiteMapEditor
+              siteMap={siteMap}
+              onChange={setSiteMap}
+              defaultAddress={custAddress || siteAddress || ""}
+              knownLat={siteLat}
+              knownLng={siteLon}
+              projectKw={effectiveSizeProject}
+              colors={C}
+              titleColor={titleColor}
+            />
+
+            {siteMapHasLayout(siteMap) && renderProposalPreviewShell(
+              "Site Map",
+              <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}` }}>
+                <h3 style={{ margin: "0 0 8px 0", fontSize: 18, fontWeight: 700, color: titleColor }}>Site Map</h3>
+                {(siteMap.address || custAddress) ? (
+                  <p style={{ margin: "0 0 10px 0", color: C.g500, fontSize: 11, fontFamily: fontSans }}>
+                    {siteMap.address || custAddress}
+                  </p>
+                ) : null}
+                <SiteMapPreview
+                  siteMap={siteMap}
+                  height={280}
+                  interactive={false}
+                />
+              </div>
+            )}
 
             {multiMeterMode ? (
               renderProposalPreviewShell(
@@ -5111,10 +5212,46 @@ export default function JantaProposal({
               const compactPageTwoFlow = !startPermissionsOnNewPage;
               const compactPageTwoCosts = compactSecondPageBundle || compactPageTwoFlow;
               const compact25yrPdf = compactSecondPageBundle || compactPageTwoFlow;
-              const coverPad = compactFirstPageBundle ? 16 : 22;
-              const firstPageSectionPad = compactFirstPageBundle ? 14 : 18;
+              const coverPad = 18;
+              const sectionPad = 18;
               const comparativeChartH = compactFirstPageBundle ? 185 : 220;
-              const seasonalChartH = compactFirstPageBundle ? 132 : 155;
+              const seasonalChartH = compactFirstPageBundle ? 140 : 155;
+              // Shared proposal typography + spacing — keep hierarchy proportional end-to-end
+              const PT = {
+                coverTitle: 24,
+                coverMeta: 12,
+                coverStat: 18,
+                coverStatLabel: 10,
+                section: 16,
+                subsection: 14,
+                body: 13,
+                bodySm: 12,
+                caption: 11,
+                label: 10,
+                table: 12,
+                tableHead: 10,
+                metric: 18,
+              };
+              const SP = {
+                titleMb: 10,
+                captionMb: 10,
+                subsectionMt: 18,
+                subsectionMb: 8,
+                blockGap: 12,
+                rowPad: "10px 12px",
+              };
+              const sectionTitle = (text) => (
+                <h3 style={{ margin: `0 0 ${SP.titleMb}px 0`, fontSize: PT.section, fontWeight: 700, color: titleColor, fontFamily: fontSans }}>{text}</h3>
+              );
+              const subsectionTitle = (text, { first = false } = {}) => (
+                <h4 style={{
+                  margin: first ? `0 0 ${SP.subsectionMb}px 0` : `${SP.subsectionMt}px 0 ${SP.subsectionMb}px 0`,
+                  fontSize: PT.subsection,
+                  fontWeight: 700,
+                  color: titleColor,
+                  fontFamily: fontSans,
+                }}>{text}</h4>
+              );
               return (
                 <>
             <div style={{ background: C.white, borderRadius: 10, padding: "14px 16px", border: `1px solid ${C.g200}` }}>
@@ -5142,71 +5279,70 @@ export default function JantaProposal({
             <div style={{ position: "relative", borderRadius: 10, overflow: "hidden" }}>
             <div style={{ position: "relative" }}>
             <div ref={proposalPdfRef} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* Cover */}
-            <div style={{ background: C.navy, borderRadius: 10, padding: coverPad, color: proposalScreenDark ? "#F8F2E8" : C.white, breakInside: "avoid", pageBreakInside: "avoid" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                <div>
-                  <div style={{ height: 50, marginBottom: 6, paddingLeft: 0, paddingTop: 0, overflow: "hidden" }}>
-                    <img
-                      crossOrigin="anonymous"
-                      src={jantaPublicAssetUrl("/assets/janta-logo-cropped.svg")}
-                      alt="Janta Power"
-                      style={{
-                        height: 54,
-                        width: "auto",
-                        display: "block",
-                        objectFit: "contain",
-                        objectPosition: "left top",
-                        transform: "translate(-6px, -6px)",
-                      }}
-                    />
-                  </div>
-                  <h2 style={{ margin: "0 0 4px 0", fontSize: 26, fontWeight: 700, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{custAddress || "Solar"} Proposal</h2>
-                  {multiMeterMode && (
-                    <p style={{ margin: "0 0 4px 0", color: C.gold, fontSize: 12, fontFamily: fontSans, fontWeight: 600 }}>
-                      {meters.length} meters · {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} combined
-                    </p>
-                  )}
-                  <p style={{ margin: 0, color: proposalScreenDark ? "#D5C7B7" : "rgba(255,255,255,0.5)", fontSize: 12, fontFamily: fontSans }}>{new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}</p>
-                </div>
-                <div style={{ textAlign: "right", fontSize: 11, fontFamily: fontSans }}>
-                  <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginBottom: 4 }}>Prepared For:</div>
-                  <div style={{ fontWeight: 600, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{custName || "—"}</div>
-                  <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custEmail}</div>
-                  <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custPhone}</div>
-                  <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginTop: 10, marginBottom: 4 }}>Prepared By:</div>
-                  <div style={{ fontWeight: 600, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{prepBy}</div>
-                  <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepEmail}</div>
-                  <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepPhone}</div>
-                </div>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 14 }}>
-                {[[formatSystemWithUnit(effectiveSizeProject, useMwDisplay), multiMeterMode ? "Total System Size" : "System Size"], ["25+ Yrs", "Lifespan"], [formatArea(landReq), "Land Required"], [formatArea(landCons), "Land Conserved"]].map(([v, l]) => (
-                  <div key={l} style={{ background: "rgba(255,255,255,0.07)", borderRadius: 6, padding: "12px 10px", textAlign: "center" }}>
-                    <div style={{ fontSize: 18, fontWeight: 700, color: C.gold }}>{v}</div>
-                    <div style={{ fontSize: 9, color: "rgba(255,255,255,0.45)", fontFamily: fontSans, marginTop: 2 }}>{l}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
             {(() => {
-              const pdfMeterPad = compactFirstPageBundle ? 10 : 12;
+              const coverBlock = (
+                <div style={{ background: C.navy, borderRadius: 10, padding: coverPad, color: proposalScreenDark ? "#F8F2E8" : C.white }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div>
+                      <div style={{ height: 44, marginBottom: 4, paddingLeft: 0, paddingTop: 0, overflow: "hidden" }}>
+                        <img
+                          crossOrigin="anonymous"
+                          src={jantaPublicAssetUrl("/assets/janta-logo-cropped.svg")}
+                          alt="Janta Power"
+                          style={{
+                            height: 48,
+                            width: "auto",
+                            display: "block",
+                            objectFit: "contain",
+                            objectPosition: "left top",
+                            transform: "translate(-6px, -6px)",
+                          }}
+                        />
+                      </div>
+                      <h2 style={{ margin: "0 0 4px 0", fontSize: PT.coverTitle, fontWeight: 700, fontFamily: fontSans, color: proposalScreenDark ? "#F8F2E8" : undefined, lineHeight: 1.25 }}>{custAddress || "Solar"} Proposal</h2>
+                      {multiMeterMode && (
+                        <p style={{ margin: "0 0 4px 0", color: C.gold, fontSize: PT.coverMeta, fontFamily: fontSans, fontWeight: 600 }}>
+                          {meters.length} meters · {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} combined
+                        </p>
+                      )}
+                      <p style={{ margin: 0, color: proposalScreenDark ? "#D5C7B7" : "rgba(255,255,255,0.5)", fontSize: PT.coverMeta, fontFamily: fontSans }}>{new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}</p>
+                    </div>
+                    <div style={{ textAlign: "right", fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.4 }}>
+                      <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginBottom: 2, fontSize: PT.label, textTransform: "uppercase", letterSpacing: "0.04em" }}>Prepared For</div>
+                      <div style={{ fontWeight: 600, fontSize: PT.bodySm, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{custName || "—"}</div>
+                      <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custEmail}</div>
+                      <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custPhone}</div>
+                      <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginTop: 8, marginBottom: 2, fontSize: PT.label, textTransform: "uppercase", letterSpacing: "0.04em" }}>Prepared By</div>
+                      <div style={{ fontWeight: 600, fontSize: PT.bodySm, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{prepBy}</div>
+                      <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepEmail}</div>
+                      <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepPhone}</div>
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 12 }}>
+                    {[[formatSystemWithUnit(effectiveSizeProject, useMwDisplay), multiMeterMode ? "Total System Size" : "System Size"], ["25+ Yrs", "Lifespan"], [formatArea(landReq), "Land Required"], [formatArea(landCons), "Land Conserved"]].map(([v, l]) => (
+                      <div key={l} style={{ background: "rgba(255,255,255,0.07)", borderRadius: 6, padding: "10px 8px", textAlign: "center" }}>
+                        <div style={{ fontSize: PT.coverStat, fontWeight: 700, color: C.gold, fontFamily: fontSans, lineHeight: 1.15 }}>{v}</div>
+                        <div style={{ fontSize: PT.coverStatLabel, color: "rgba(255,255,255,0.45)", fontFamily: fontSans, marginTop: 3, textTransform: "uppercase", letterSpacing: "0.04em" }}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
               const renderPdfMeterPage = (bundle, mi, { chartH, seasonalH, pairPage = false, firstPageMeter = false }) => (
                 <div
                   key={bundle.id}
                   style={{
                     background: C.white,
                     borderRadius: 10,
-                    padding: pdfMeterPad,
+                    padding: sectionPad,
                     border: `1px solid ${C.g200}`,
                   }}
                 >
-                  <h3 style={{ margin: "0 0 4px 0", fontSize: firstPageMeter ? 14 : pairPage ? 15 : compactFirstPageBundle ? 16 : 18, fontWeight: 700, color: titleColor }}>
+                  <h3 style={{ margin: `0 0 4px 0`, fontSize: PT.section, fontWeight: 700, color: titleColor, fontFamily: fontSans }}>
                     {formatMeterDisplayName(bundle.name, bundle.meterNumber)}
-                    {bundle.account ? <span style={{ fontWeight: 400, color: C.g500, fontSize: 11 }}> · Acct …{String(bundle.account).slice(-4)}</span> : null}
+                    {bundle.account ? <span style={{ fontWeight: 400, color: C.g500, fontSize: PT.caption }}> · Acct …{String(bundle.account).slice(-4)}</span> : null}
                   </h3>
-                  <p style={{ margin: "0 0 6px 0", fontSize: 10, color: C.g500, fontFamily: fontSans }}>
+                  <p style={{ margin: `0 0 ${SP.captionMb}px 0`, fontSize: PT.caption, color: C.g500, fontFamily: fontSans, lineHeight: 1.45 }}>
                     Meter {mi + 1} of {meterBundles.length} — {productionOnlyMode ? "individual production" : "individual production and usage"}
                   </p>
                   {renderMeterChartsBlock(bundle, {
@@ -5216,6 +5352,7 @@ export default function JantaProposal({
                     forPdf: true,
                     pairPage: pairPage || firstPageMeter,
                     firstPageMeter,
+                    typeScale: PT,
                   })}
                 </div>
               );
@@ -5223,19 +5360,89 @@ export default function JantaProposal({
               const pairSeasonalH = compactFirstPageBundle ? 100 : 112;
               const firstChartH = compactFirstPageBundle ? 82 : 92;
               const firstSeasonalH = compactFirstPageBundle ? 96 : 108;
-              const overviewRowPad = multiMeterMode && compactFirstPageBundle ? "7px 10px" : "10px 12px";
-              const overviewIntroMb = multiMeterMode && compactFirstPageBundle ? 6 : 10;
-              const overviewTitleMb = multiMeterMode && compactFirstPageBundle ? 6 : compactFirstPageBundle ? 10 : 14;
+              const financialSectionHeading = multiMeterMode
+                ? (productionOnlyMode ? "Project Production (All Meters Combined)" : "Project Totals (All Meters Combined)")
+                : proposalFinancialSectionTitle;
 
-              const projectOverviewBlock = (
-                <div style={{ background: C.white, borderRadius: 10, padding: firstPageSectionPad, border: `1px solid ${C.g200}` }}>
-                  <h3 style={{ margin: `0 0 ${overviewTitleMb}px 0`, fontSize: compactFirstPageBundle ? 16 : 18, fontWeight: 700, color: titleColor }}>
-                    {multiMeterMode
-                      ? (productionOnlyMode ? "Project Production (All Meters Combined)" : "Project Overview (All Meters Combined)")
-                      : proposalFinancialSectionTitle}
-                  </h3>
+              const firstPageSiteMapH = compactFirstPageBundle ? 220 : 260;
+              const introSiteBlock = (
+                <div
+                  style={{
+                    background: C.white,
+                    borderRadius: 10,
+                    padding: sectionPad,
+                    border: `1px solid ${C.g200}`,
+                    breakInside: "avoid",
+                    pageBreakInside: "avoid",
+                  }}
+                >
+                  {sectionTitle("Proposal Overview")}
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 ${SP.captionMb}px 0` }}>
+                    Janta Power pioneers three-dimensional solar tower technology, delivering greater energy output per square foot than conventional flat solar arrays. This proposal outlines the projected savings, space requirements, energy production, and return on investment for your site.
+                  </p>
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 ${SP.captionMb}px 0` }}>
+                    This document is a preliminary proposal and does not constitute a binding contract or a commitment by either party to proceed with installation. It serves as authorization for Janta Power to begin project pre-development, as described below.
+                  </p>
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 4px 0` }}>
+                    Upon signature, we will begin project preparation, including:
+                  </p>
+                  <ul style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 ${SP.captionMb}px 0`, paddingLeft: 22 }}>
+                    <li>An initial site survey</li>
+                    <li>Soil testing</li>
+                    <li>Follow-up inspections to confirm interconnection points and site conditions</li>
+                  </ul>
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 ${SP.captionMb}px 0` }}>
+                    Pricing, system design, and final terms remain subject to change based on findings from the project pre-development phase. Once complete, we will prepare a separate installation contract for your review and signature before any installation work begins.
+                  </p>
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: 0 }}>
+                    Please review the details below and reach out with any questions. If you'd like to proceed, sign at the bottom of this page to authorize the next steps.
+                  </p>
+
+                  {siteMapHasLayout(siteMap) ? (
+                    <div style={{ marginTop: SP.subsectionMt }}>
+                      {subsectionTitle("Site Map", { first: true })}
+                      {(siteMap.address || custAddress) ? (
+                        <p style={{ margin: `0 0 ${SP.captionMb}px 0`, color: C.g500, fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.45 }}>{siteMap.address || custAddress}</p>
+                      ) : null}
+                      {siteMap.bakedImageDataUrl ? (
+                        <img
+                          src={siteMap.bakedImageDataUrl}
+                          alt="Site map with proposed solar towers"
+                          style={{ display: "block", width: "100%", maxHeight: firstPageSiteMapH, objectFit: "cover", objectPosition: "center", borderRadius: 8, border: `1px solid ${C.g200}` }}
+                        />
+                      ) : pdfExporting ? null : (
+                        <SiteMapPreview
+                          siteMap={siteMap}
+                          height={firstPageSiteMapH}
+                          interactive
+                          onZoomChange={(zoom) => {
+                            setSiteMap((prev) => {
+                              const sm = normalizeSiteMap(prev);
+                              if (sm.zoom === zoom) return prev;
+                              return { ...sm, zoom, bakedImageDataUrl: null };
+                            });
+                          }}
+                        />
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              );
+
+              const financialBreakdownBlock = (
+                <div
+                  style={{
+                    background: C.white,
+                    borderRadius: 10,
+                    padding: sectionPad,
+                    border: `1px solid ${C.g200}`,
+                    breakInside: "avoid",
+                    pageBreakInside: "avoid",
+                  }}
+                >
+                  {sectionTitle(financialSectionHeading)}
                   {multiMeterMode && (
-                    <p style={{ margin: `0 0 ${overviewIntroMb}px 0`, fontSize: 10, color: C.g500, fontFamily: fontSans, lineHeight: 1.4 }}>
+                    <p style={{ margin: `0 0 ${SP.captionMb}px 0`, fontSize: PT.caption, color: C.g500, fontFamily: fontSans, lineHeight: 1.45 }}>
                       {productionOnlyMode
                         ? `Combined ${formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} across ${meters.length} meters. Production figures only — no utility bill analysis.`
                         : `One combined system (${formatSystemWithUnit(effectiveSizeProject, useMwDisplay)}). Pricing and incentives apply to total project cost — not per meter.`}
@@ -5255,21 +5462,19 @@ export default function JantaProposal({
                     ["Annual Energy Production", formatEnergyWithUnit(annualProd, useMwhDisplay)],
                     ...(includeRoiMetrics ? [["Annual Return on Investment", `${roi.toFixed(1)}%`]] : []),
                   ].map(([k, v]) => (
-                    <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: overviewRowPad, borderBottom: `1px solid ${C.g200}` }}>
-                      <span style={{ color: C.g700, fontSize: multiMeterMode && compactFirstPageBundle ? 12 : 13 }}>{k}</span>
-                      <span style={{ color: C.navy, fontSize: multiMeterMode && compactFirstPageBundle ? 12 : 13, fontWeight: 700, fontFamily: fontSans }}>{v}</span>
+                    <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: SP.rowPad, borderBottom: `1px solid ${C.g200}` }}>
+                      <span style={{ color: C.g700, fontSize: PT.bodySm, fontFamily: fontSans }}>{k}</span>
+                      <span style={{ color: C.navy, fontSize: PT.bodySm, fontWeight: 700, fontFamily: fontSans }}>{v}</span>
                     </div>
                   ))}
                   {includeUtilityBillEconomics && savingsOnlyMode && (
-                    <p style={{ margin: `${overviewIntroMb}px 0 0 0`, fontSize: 9, color: C.g500, fontFamily: fontSans, lineHeight: 1.45 }}>
+                    <p style={{ margin: `${SP.captionMb}px 0 0 0`, fontSize: PT.label, color: C.g500, fontFamily: fontSans, lineHeight: 1.45 }}>
                       25-year utility savings are estimated cumulative bill offsets at the effective rate above (defaults to $0.12/kWh if not provided). Offset % compares production to annual usage.
                     </p>
                   )}
                   {!multiMeterMode && (
-                    <div style={{ marginTop: 22 }}>
-                      <h4 style={{ margin: "0 0 10px 0", fontSize: compactFirstPageBundle ? 14 : 16, fontWeight: 700, color: titleColor }}>
-                        {proposalProdChart.title}
-                      </h4>
+                    <div style={{ marginTop: SP.subsectionMt }}>
+                      {subsectionTitle(proposalProdChart.title, { first: true })}
                       <BarChart
                         {...proposalProdChart.chart}
                         missingBarColor={proposalScreenDark ? "#E85D5D" : "#D64545"}
@@ -5277,15 +5482,28 @@ export default function JantaProposal({
                         height={comparativeChartH}
                         showBarValues
                       />
-                      <h4 style={{ margin: compactFirstPageBundle ? "14px 0 6px 0" : "18px 0 8px 0", fontSize: compactFirstPageBundle ? 14 : 16, fontWeight: 700, color: titleColor }}>
-                        Seasonal Production
-                      </h4>
-                      <p style={{ color: C.g500, fontSize: compactFirstPageBundle ? 10 : 11, fontFamily: fontSans, margin: "0 0 10px 0" }}>
+                      {subsectionTitle("Seasonal Production")}
+                      <p style={{ color: C.g500, fontSize: PT.caption, fontFamily: fontSans, margin: `0 0 ${SP.captionMb}px 0`, lineHeight: 1.45 }}>
                         Average power (kW) by month for the {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} system{samData ? " — from NREL PVWatts" : ""}.
                       </p>
-                      <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={seasonalChartH} title="" />
+                      <SeasonalChart monthlyKWh={monthlyProd} color={C.gold} height={seasonalChartH} title="" useMwh={useMwhDisplay} />
                     </div>
                   )}
+                </div>
+              );
+
+              const firstPageBlock = (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: SP.blockGap,
+                    breakInside: "avoid",
+                    pageBreakInside: "avoid",
+                  }}
+                >
+                  {coverBlock}
+                  {introSiteBlock}
                 </div>
               );
 
@@ -5294,16 +5512,19 @@ export default function JantaProposal({
                 const restMeters = meterBundles.slice(1);
                 return (
                   <>
+                    {firstPageBlock}
                     <div
                       style={{
                         display: "flex",
                         flexDirection: "column",
-                        gap: compactFirstPageBundle ? 8 : 10,
+                        gap: SP.blockGap,
+                        breakBefore: "page",
+                        pageBreakBefore: "always",
                         breakInside: "avoid",
                         pageBreakInside: "avoid",
                       }}
                     >
-                      {projectOverviewBlock}
+                      {financialBreakdownBlock}
                       {renderPdfMeterPage(firstMeter, 0, {
                         chartH: firstChartH,
                         seasonalH: firstSeasonalH,
@@ -5322,7 +5543,7 @@ export default function JantaProposal({
                             pageBreakInside: "avoid",
                             display: "flex",
                             flexDirection: "column",
-                            gap: compactFirstPageBundle ? 8 : 10,
+                            gap: SP.blockGap,
                           }}
                         >
                           {pair.map((bundle, i) =>
@@ -5339,28 +5560,58 @@ export default function JantaProposal({
                 );
               }
 
-              if (!multiMeterMode) {
-                return (
-                  <div style={{ breakInside: "avoid", pageBreakInside: "avoid" }}>{projectOverviewBlock}</div>
-                );
-              }
-
-              return null;
+              return (
+                <>
+                  {firstPageBlock}
+                  <div style={{ breakBefore: "page", pageBreakBefore: "always" }}>
+                    {financialBreakdownBlock}
+                  </div>
+                </>
+              );
             })()}
 
-            <div style={{ breakBefore: "page", pageBreakBefore: "always", breakInside: "avoid", pageBreakInside: "avoid", display: "flex", flexDirection: "column", gap: compactPageTwoCosts ? 8 : 12 }}>
-              {renderSystemCostsSection(true, compactPageTwoCosts)}
+            <div style={{ breakBefore: "page", pageBreakBefore: "always", breakInside: "avoid", pageBreakInside: "avoid", display: "flex", flexDirection: "column", gap: SP.blockGap }}>
+              {renderSystemCostsSection(
+                true,
+                compactPageTwoCosts,
+                PT,
+                includeRoiMetrics ? (
+                  <div style={{ marginTop: SP.subsectionMt }}>
+                    {subsectionTitle("25-Year Projection", { first: true })}
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: PT.table, fontFamily: fontSans }}>
+                      <thead><tr>{["Year", "Production", "Annual Savings", "Cumulative", "Net"].map(h => (
+                        <th key={h} style={{ color: C.g500, fontSize: PT.tableHead, textTransform: "uppercase", padding: "6px 4px", textAlign: "right", borderBottom: `1px solid ${C.g200}`, fontFamily: fontSans }}>{h}</th>
+                      ))}</tr></thead>
+                      <tbody>{projection
+                        .filter((_, i) => (
+                          compact25yrPdf
+                            ? (i < 3 || i === 9 || i === 19 || i === 24)
+                            : (i < 5 || i === 9 || i === 14 || i === 19 || i === 24)
+                        ))
+                        .map(r => (
+                        <tr key={r.y} style={{ background: r.net >= 0 ? (proposalScreenDark ? "#1A271F" : "#F0FAF4") : "transparent" }}>
+                          <td style={{ padding: "5px 4px", textAlign: "right", color: C.g500 }}>{r.y}</td>
+                          <td style={{ padding: "5px 4px", textAlign: "right", color: proposalScreenDark ? "#FFFFFF" : undefined }}>{r.prod.toLocaleString()}</td>
+                          <td style={{ padding: "5px 4px", textAlign: "right", color: C.green }}>${r.sav.toLocaleString()}</td>
+                          <td style={{ padding: "5px 4px", textAlign: "right", color: proposalScreenDark ? "#FFFFFF" : C.navy }}>${r.cum.toLocaleString()}</td>
+                          <td style={{ padding: "5px 4px", textAlign: "right", color: r.net >= 0 ? C.green : C.red, fontWeight: 600 }}>{r.net >= 0 ? "+" : ""}${r.net.toLocaleString()}</td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                ) : null
+              )}
 
             {includeFinancialsInProposal && (
-              <div style={{ background: C.white, borderRadius: 10, padding: compactSecondPageBundle ? 14 : 24, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
-                <h3 style={{ margin: compactSecondPageBundle ? "0 0 8px 0" : "0 0 12px 0", fontSize: compactSecondPageBundle ? 14 : 16, fontWeight: 700, color: titleColor }}>Project Financials</h3>
+              <div style={{ background: C.white, borderRadius: 10, padding: sectionPad, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
+                {sectionTitle("Project Financials")}
                 <div style={{ overflowX: "auto", border: `1px solid ${C.g200}`, borderRadius: 8 }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: compactSecondPageBundle ? 10 : 11, fontFamily: fontSans, minWidth: compactSecondPageBundle ? 680 : 760 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: PT.table, fontFamily: fontSans, minWidth: compactSecondPageBundle ? 680 : 760 }}>
                     <thead>
                       <tr style={{ background: proposalScreenDark ? "#211A14" : "#F1F5FB" }}>
-                        <th style={{ textAlign: "left", padding: compactSecondPageBundle ? "5px 6px" : "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Value of Energy Produced ($/MWh)</th>
+                        <th style={{ textAlign: "left", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontSize: PT.tableHead }}>Value of Energy Produced ($/MWh)</th>
                         {finScenarios.map((s) => (
-                          <th key={`ph-${s.price}`} style={{ textAlign: "right", padding: compactSecondPageBundle ? "5px 6px" : "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{s.price.toFixed(1)}</th>
+                          <th key={`ph-${s.price}`} style={{ textAlign: "right", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontSize: PT.tableHead }}>{s.price.toFixed(1)}</th>
                         ))}
                       </tr>
                     </thead>
@@ -5414,41 +5665,14 @@ export default function JantaProposal({
                 </div>
               </div>
             )}
-
-            {/* 25yr Table */}
-            {includeRoiMetrics && (
-              <div style={{ background: C.white, borderRadius: 10, padding: compact25yrPdf ? 14 : 24, border: `1px solid ${C.g200}`, breakInside: "avoid", pageBreakInside: "avoid" }}>
-                <h3 style={{ margin: compact25yrPdf ? "0 0 8px 0" : "0 0 12px 0", fontSize: compact25yrPdf ? 14 : 15, fontWeight: 700, color: titleColor }}>25-Year Projection</h3>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: compact25yrPdf ? 10 : 11, fontFamily: fontSans }}>
-                  <thead><tr>{["Year", "Production", "Annual Savings", "Cumulative", "Net"].map(h => (
-                    <th key={h} style={{ color: C.g500, fontSize: 9, textTransform: "uppercase", padding: compact25yrPdf ? "5px 3px" : "6px 4px", textAlign: "right", borderBottom: `1px solid ${C.g200}` }}>{h}</th>
-                  ))}</tr></thead>
-                  <tbody>{projection
-                    .filter((_, i) => (
-                      compact25yrPdf
-                        ? (i < 3 || i === 9 || i === 19 || i === 24)
-                        : (i < 5 || i === 9 || i === 14 || i === 19 || i === 24)
-                    ))
-                    .map(r => (
-                    <tr key={r.y} style={{ background: r.net >= 0 ? (proposalScreenDark ? "#1A271F" : "#F0FAF4") : "transparent" }}>
-                      <td style={{ padding: "5px 4px", textAlign: "right", color: C.g500 }}>{r.y}</td>
-                      <td style={{ padding: "5px 4px", textAlign: "right", color: proposalScreenDark ? "#FFFFFF" : undefined }}>{r.prod.toLocaleString()}</td>
-                      <td style={{ padding: "5px 4px", textAlign: "right", color: C.green }}>${r.sav.toLocaleString()}</td>
-                      <td style={{ padding: "5px 4px", textAlign: "right", color: proposalScreenDark ? "#FFFFFF" : C.navy }}>${r.cum.toLocaleString()}</td>
-                      <td style={{ padding: "5px 4px", textAlign: "right", color: r.net >= 0 ? C.green : C.red, fontWeight: 600 }}>{r.net >= 0 ? "+" : ""}${r.net.toLocaleString()}</td>
-                    </tr>
-                  ))}</tbody>
-                </table>
-              </div>
-            )}
             </div>
 
-            {/* Permissions + Signature — compact when sharing page 2; roomier when own page */}
+            {/* Permissions + Signature */}
             <div
               style={{
                 background: C.white,
                 borderRadius: 10,
-                padding: compactPageTwoFlow ? 16 : 28,
+                padding: sectionPad,
                 border: `1px solid ${C.g200}`,
                 ...(startPermissionsOnNewPage || includeFinancialsInProposal
                   ? { breakInside: "avoid", pageBreakInside: "avoid" }
@@ -5456,31 +5680,25 @@ export default function JantaProposal({
                 ...((startPermissionsOnNewPage || includeFinancialsInProposal) ? { breakBefore: "page", pageBreakBefore: "always" } : {}),
               }}
             >
-              <h3 style={{ margin: compactPageTwoFlow ? "0 0 8px 0" : "0 0 12px 0", fontSize: compactPageTwoFlow ? 14 : 17, fontWeight: 700, color: titleColor }}>Permissions and Details</h3>
-              <p style={{ color: C.g700, fontSize: compactPageTwoFlow ? 11 : 13, lineHeight: compactPageTwoFlow ? 1.52 : 1.72, fontFamily: fontSans, margin: compactPageTwoFlow ? "0 0 9px 0" : "0 0 16px 0" }}>
+              {sectionTitle("Permissions and Details")}
+              <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.65, fontFamily: fontSans, margin: `0 0 ${SP.subsectionMt}px 0` }}>
                 For this project, we will obtain all required permits from both municipal agencies and the utility company. The building permit ensures the installation meets code and does not impact surrounding structures. The utility permit, known as an interconnection permit, grants permission to connect your system to the grid and confirms the system is safe and code-compliant. Our solar towers are designed to meet all current local, state, and national regulations.
               </p>
-              <div style={{ background: C.g100, borderRadius: 8, padding: compactPageTwoFlow ? 10 : 16, border: `1px solid ${C.g200}`, marginBottom: compactPageTwoFlow ? 11 : 22, breakInside: "avoid", pageBreakInside: "avoid" }}>
-                <div style={{ color: C.g500, fontSize: compactPageTwoFlow ? 9 : 11, textTransform: "uppercase", fontFamily: fontSans, marginBottom: compactPageTwoFlow ? 4 : 5 }}>Site Overview</div>
-                <p style={{ color: C.g700, fontSize: compactPageTwoFlow ? 11 : 13, lineHeight: compactPageTwoFlow ? 1.45 : 1.65, fontFamily: fontSans, margin: 0 }}>
-                  To complete the design and validate final output potential, we recommend a follow-up site inspection to assess soil conditions (for ground-mounted units), accessibility, electrical interconnection points, and regional weather patterns.
-                </p>
-              </div>
 
               <div style={{ breakInside: "avoid", pageBreakInside: "avoid" }}>
-                <h3 style={{ fontSize: compactPageTwoFlow ? 17 : 24, fontWeight: 400, color: titleColor, margin: compactPageTwoFlow ? "0 0 7px 0" : "0 0 12px 0" }}>Customer Approval:</h3>
-                <p style={{ color: C.g700, fontSize: compactPageTwoFlow ? 11 : 13, fontFamily: fontSans, marginBottom: compactPageTwoFlow ? 10 : 22, lineHeight: compactPageTwoFlow ? 1.48 : 1.65 }}>
+                {sectionTitle("Customer Approval")}
+                <p style={{ color: C.g700, fontSize: PT.body, fontFamily: fontSans, marginBottom: SP.subsectionMt, lineHeight: 1.65 }}>
                   Once you've reviewed the terms above, sign this proposal to indicate your approval. An installation contract will then be created and sent to you for final approval and signature.
                 </p>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: compactPageTwoFlow ? 18 : 36 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 28 }}>
                   <div>
-                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: compactPageTwoFlow ? 11 : 13, fontWeight: 700, marginBottom: compactPageTwoFlow ? 3 : 5 }}>Signature:</div>
-                    <div style={{ borderBottom: `1px solid ${C.g300}`, height: compactPageTwoFlow ? 28 : 40, marginBottom: compactPageTwoFlow ? 5 : 7, display: "flex", alignItems: "flex-end" }}>
+                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: PT.body, fontWeight: 700, marginBottom: 6, fontFamily: fontSans }}>Signature:</div>
+                    <div style={{ borderBottom: `1px solid ${C.g300}`, height: 36, marginBottom: 8, display: "flex", alignItems: "flex-end" }}>
                       <img
                         src={jantaPublicAssetUrl("/assets/adam-boudissa-signature-new.png")}
                         alt="Adam Boudissa signature"
                         style={{
-                          maxHeight: compactPageTwoFlow ? 24 : 34,
+                          maxHeight: 30,
                           width: "auto",
                           objectFit: "contain",
                           imageRendering: "auto",
@@ -5491,20 +5709,20 @@ export default function JantaProposal({
                         }}
                       />
                     </div>
-                    <div style={{ fontSize: compactPageTwoFlow ? 11 : 13, fontFamily: fontSans, color: C.g700 }}>Janta Power</div>
-                    <div style={{ fontSize: compactPageTwoFlow ? 11 : 13, fontFamily: fontSans, color: C.g700 }}>Adam Boudissa, Finance Officer</div>
+                    <div style={{ fontSize: PT.body, fontFamily: fontSans, color: C.g700 }}>Janta Power</div>
+                    <div style={{ fontSize: PT.body, fontFamily: fontSans, color: C.g700 }}>Adam Boudissa, Finance Officer</div>
                   </div>
                   <div>
-                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: compactPageTwoFlow ? 11 : 13, fontWeight: 700, marginBottom: compactPageTwoFlow ? 3 : 5 }}>Signature:</div>
-                    <div style={{ borderBottom: `1px solid ${C.g300}`, height: compactPageTwoFlow ? 28 : 40, marginBottom: compactPageTwoFlow ? 5 : 7 }} />
-                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: compactPageTwoFlow ? 11 : 13, fontWeight: 700, marginBottom: compactPageTwoFlow ? 3 : 5 }}>Printed Name:</div>
-                    <div style={{ borderBottom: `1px solid ${C.g300}`, height: compactPageTwoFlow ? 28 : 40 }} />
+                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: PT.body, fontWeight: 700, marginBottom: 6, fontFamily: fontSans }}>Signature:</div>
+                    <div style={{ borderBottom: `1px solid ${C.g300}`, height: 36, marginBottom: 8 }} />
+                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: PT.body, fontWeight: 700, marginBottom: 6, fontFamily: fontSans }}>Printed Name:</div>
+                    <div style={{ borderBottom: `1px solid ${C.g300}`, height: 36 }} />
                   </div>
                 </div>
               </div>
             </div>
 
-            <div style={{ textAlign: "center", color: C.g500, fontSize: 11, fontFamily: fontSans, padding: "4px 0 16px 0" }}>
+            <div style={{ textAlign: "center", color: C.g500, fontSize: PT.caption, fontFamily: fontSans, padding: "4px 0 16px 0" }}>
               Empowering the Future of Sustainable Energy — {new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}
             </div>
             </div>

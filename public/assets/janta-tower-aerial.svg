@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160">
+  <!-- Soft elevation shadow (matches aerial photo look) -->
+  <ellipse cx="72" cy="122" rx="40" ry="13" fill="rgba(0,0,0,0.35)"/>
+  <g transform="translate(80 78)">
+    <!-- Left bank -->
+    <rect x="-48" y="-54" width="44" height="108" rx="2" fill="#14233E"/>
+    <g fill="#1C314F">
+      <rect x="-46" y="-52" width="19" height="33" rx="0.5"/>
+      <rect x="-25" y="-52" width="19" height="33" rx="0.5"/>
+      <rect x="-46" y="-17" width="19" height="33" rx="0.5"/>
+      <rect x="-25" y="-17" width="19" height="33" rx="0.5"/>
+      <rect x="-46" y="18" width="19" height="34" rx="0.5"/>
+      <rect x="-25" y="18" width="19" height="34" rx="0.5"/>
+    </g>
+    <g stroke="rgba(190,210,235,0.3)" stroke-width="0.55" fill="none">
+      <path d="M-46 -35.5 H-6 M-46 -0.5 H-6 M-46 34.5 H-6"/>
+      <path d="M-35.5 -52 V52"/>
+    </g>
+    <rect x="-48" y="-54" width="44" height="108" rx="2" fill="none" stroke="#0A1220" stroke-width="1.3"/>
+    <!-- Right bank -->
+    <rect x="4" y="-54" width="44" height="108" rx="2" fill="#182940"/>
+    <g fill="#22385A">
+      <rect x="6" y="-52" width="19" height="33" rx="0.5"/>
+      <rect x="27" y="-52" width="19" height="33" rx="0.5"/>
+      <rect x="6" y="-17" width="19" height="33" rx="0.5"/>
+      <rect x="27" y="-17" width="19" height="33" rx="0.5"/>
+      <rect x="6" y="18" width="19" height="34" rx="0.5"/>
+      <rect x="27" y="18" width="19" height="34" rx="0.5"/>
+    </g>
+    <g stroke="rgba(190,210,235,0.3)" stroke-width="0.55" fill="none">
+      <path d="M6 -35.5 H46 M6 -0.5 H46 M6 34.5 H46"/>
+      <path d="M16.5 -52 V52"/>
+    </g>
+    <rect x="4" y="-54" width="44" height="108" rx="2" fill="none" stroke="#0A1220" stroke-width="1.3"/>
+    <!-- Center yoke -->
+    <rect x="-5" y="-56" width="10" height="112" rx="1.5" fill="#D2D6DC"/>
+    <rect x="-7" y="-9" width="14" height="18" rx="2" fill="#8E959E"/>
+    <circle cx="0" cy="0" r="5" fill="#5F6670"/>
+    <rect x="-40" y="-48" width="12" height="16" rx="1" fill="rgba(255,255,255,0.2)"/>
+  </g>
+</svg>

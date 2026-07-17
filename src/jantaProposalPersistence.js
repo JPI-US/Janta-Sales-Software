@@ -1,5 +1,6 @@
 import { SNAPSHOT_VERSION } from "./proposalSnapshot.js";
 import { normalizeOptionalEquipment, collapseEquipmentForStorage } from "./optionalEquipment.js";
+import { createEmptySiteMap, normalizeSiteMap } from "./siteMapModel.js";
 
 export function buildProposalSnapshot(s) {
   return {
@@ -43,6 +44,7 @@ export function buildProposalSnapshot(s) {
     siteAddress: s.siteAddress,
     siteLat: s.siteLat,
     siteLon: s.siteLon,
+    siteMap: normalizeSiteMap(s.siteMap || createEmptySiteMap()),
     samTilt: s.samTilt,
     samAzimuth: s.samAzimuth,
     samArrayType: s.samArrayType,
@@ -119,6 +121,14 @@ export function applyProposalSnapshot(snapshot, setters) {
   set(setters.setSiteAddress, snapshot.siteAddress ?? "");
   set(setters.setSiteLat, snapshot.siteLat ?? null);
   set(setters.setSiteLon, snapshot.siteLon ?? null);
+  const restoredSiteMap = normalizeSiteMap(snapshot.siteMap);
+  setters.setSiteMap(restoredSiteMap);
+  const mapAddress = String(restoredSiteMap.address || "").trim();
+  const restoredSiteAddress = String(snapshot.siteAddress || "").trim();
+  // Preserve an explicit Site address override that differs from the site map.
+  if (typeof setters.markSiteAddressManual === "function") {
+    setters.markSiteAddressManual(Boolean(restoredSiteAddress && mapAddress && restoredSiteAddress !== mapAddress));
+  }
   set(setters.setSamTilt, snapshot.samTilt ?? "60");
   set(setters.setSamAzimuth, snapshot.samAzimuth ?? "180");
   set(setters.setSamArrayType, snapshot.samArrayType ?? 4);
