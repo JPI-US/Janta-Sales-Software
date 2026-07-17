@@ -107,6 +107,15 @@ async function rasterizeImagesForHtml2Pdf(root) {
 
       img.src = canvas.toDataURL("image/png");
       img.style.filter = "none";
+      // Keep site-map bake aspect (720×350). html2canvas ignores object-fit and
+      // will stretch if CSS forces a height that does not match width:100%.
+      if (img.alt === "Site map with proposed solar towers") {
+        img.removeAttribute("height");
+        img.style.height = "auto";
+        img.style.maxHeight = "none";
+        img.style.width = "100%";
+        img.style.objectFit = "contain";
+      }
       try {
         await img.decode();
       } catch (_) {
@@ -5364,8 +5373,41 @@ export default function JantaProposal({
                 ? (productionOnlyMode ? "Project Production (All Meters Combined)" : "Project Totals (All Meters Combined)")
                 : proposalFinancialSectionTitle;
 
-              const firstPageSiteMapH = compactFirstPageBundle ? 220 : 260;
+              const firstPageSiteMapH = compactFirstPageBundle ? 240 : 280;
               const introSiteBlock = (
+                <div
+                  style={{
+                    background: C.white,
+                    borderRadius: 10,
+                    padding: sectionPad,
+                    border: `1px solid ${C.g200}`,
+                  }}
+                >
+                  {sectionTitle("Proposal Overview")}
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 8px 0` }}>
+                    Janta Power pioneers three-dimensional solar tower technology, delivering greater energy output per square foot than conventional flat solar arrays. This proposal outlines the projected savings, space requirements, energy production, and return on investment for your site.
+                  </p>
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 8px 0` }}>
+                    This document is a preliminary proposal and does not constitute a binding contract or a commitment by either party to proceed with installation. It serves as authorization for Janta Power to begin project pre-development, as described below.
+                  </p>
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 2px 0` }}>
+                    Upon signature, we will begin project preparation, including:
+                  </p>
+                  <ul style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 8px 0`, paddingLeft: 22 }}>
+                    <li>An initial site survey</li>
+                    <li>Soil testing</li>
+                    <li>Follow-up inspections to confirm interconnection points and site conditions</li>
+                  </ul>
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 8px 0` }}>
+                    Pricing, system design, and final terms remain subject to change based on findings from the project pre-development phase. Once complete, we will prepare a separate installation contract for your review and signature before any installation work begins.
+                  </p>
+                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: 0 }}>
+                    Please review the details below and reach out with any questions. If you'd like to proceed, sign at the bottom of this page to authorize the next steps.
+                  </p>
+                </div>
+              );
+
+              const siteMapBlock = siteMapHasLayout(siteMap) ? (
                 <div
                   style={{
                     background: C.white,
@@ -5376,58 +5418,40 @@ export default function JantaProposal({
                     pageBreakInside: "avoid",
                   }}
                 >
-                  {sectionTitle("Proposal Overview")}
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 ${SP.captionMb}px 0` }}>
-                    Janta Power pioneers three-dimensional solar tower technology, delivering greater energy output per square foot than conventional flat solar arrays. This proposal outlines the projected savings, space requirements, energy production, and return on investment for your site.
-                  </p>
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 ${SP.captionMb}px 0` }}>
-                    This document is a preliminary proposal and does not constitute a binding contract or a commitment by either party to proceed with installation. It serves as authorization for Janta Power to begin project pre-development, as described below.
-                  </p>
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 4px 0` }}>
-                    Upon signature, we will begin project preparation, including:
-                  </p>
-                  <ul style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 ${SP.captionMb}px 0`, paddingLeft: 22 }}>
-                    <li>An initial site survey</li>
-                    <li>Soil testing</li>
-                    <li>Follow-up inspections to confirm interconnection points and site conditions</li>
-                  </ul>
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: `0 0 ${SP.captionMb}px 0` }}>
-                    Pricing, system design, and final terms remain subject to change based on findings from the project pre-development phase. Once complete, we will prepare a separate installation contract for your review and signature before any installation work begins.
-                  </p>
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.55, fontFamily: fontSans, margin: 0 }}>
-                    Please review the details below and reach out with any questions. If you'd like to proceed, sign at the bottom of this page to authorize the next steps.
-                  </p>
-
-                  {siteMapHasLayout(siteMap) ? (
-                    <div style={{ marginTop: SP.subsectionMt }}>
-                      {subsectionTitle("Site Map", { first: true })}
-                      {(siteMap.address || custAddress) ? (
-                        <p style={{ margin: `0 0 ${SP.captionMb}px 0`, color: C.g500, fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.45 }}>{siteMap.address || custAddress}</p>
-                      ) : null}
-                      {siteMap.bakedImageDataUrl ? (
-                        <img
-                          src={siteMap.bakedImageDataUrl}
-                          alt="Site map with proposed solar towers"
-                          style={{ display: "block", width: "100%", maxHeight: firstPageSiteMapH, objectFit: "cover", objectPosition: "center", borderRadius: 8, border: `1px solid ${C.g200}` }}
-                        />
-                      ) : pdfExporting ? null : (
-                        <SiteMapPreview
-                          siteMap={siteMap}
-                          height={firstPageSiteMapH}
-                          interactive
-                          onZoomChange={(zoom) => {
-                            setSiteMap((prev) => {
-                              const sm = normalizeSiteMap(prev);
-                              if (sm.zoom === zoom) return prev;
-                              return { ...sm, zoom, bakedImageDataUrl: null };
-                            });
-                          }}
-                        />
-                      )}
-                    </div>
+                  {sectionTitle("Site Map")}
+                  {(siteMap.address || custAddress) ? (
+                    <p style={{ margin: `0 0 8px 0`, color: C.g500, fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.4 }}>{siteMap.address || custAddress}</p>
                   ) : null}
+                  {siteMap.bakedImageDataUrl ? (
+                    <img
+                      src={siteMap.bakedImageDataUrl}
+                      alt="Site map with proposed solar towers"
+                      width={720}
+                      height={350}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        height: "auto",
+                        borderRadius: 8,
+                        border: `1px solid ${C.g200}`,
+                      }}
+                    />
+                  ) : pdfExporting ? null : (
+                    <SiteMapPreview
+                      siteMap={siteMap}
+                      height={firstPageSiteMapH}
+                      interactive
+                      onZoomChange={(zoom) => {
+                        setSiteMap((prev) => {
+                          const sm = normalizeSiteMap(prev);
+                          if (sm.zoom === zoom) return prev;
+                          return { ...sm, zoom, bakedImageDataUrl: null };
+                        });
+                      }}
+                    />
+                  )}
                 </div>
-              );
+              ) : null;
 
               const financialBreakdownBlock = (
                 <div
@@ -5492,19 +5516,12 @@ export default function JantaProposal({
                 </div>
               );
 
-              const firstPageBlock = (
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: SP.blockGap,
-                    breakInside: "avoid",
-                    pageBreakInside: "avoid",
-                  }}
-                >
+              const firstPageBlocks = (
+                <>
                   {coverBlock}
                   {introSiteBlock}
-                </div>
+                  {siteMapBlock}
+                </>
               );
 
               if (multiMeterMode && meterBundles.length > 0) {
@@ -5512,7 +5529,7 @@ export default function JantaProposal({
                 const restMeters = meterBundles.slice(1);
                 return (
                   <>
-                    {firstPageBlock}
+                    {firstPageBlocks}
                     <div
                       style={{
                         display: "flex",
@@ -5562,7 +5579,7 @@ export default function JantaProposal({
 
               return (
                 <>
-                  {firstPageBlock}
+                  {firstPageBlocks}
                   <div style={{ breakBefore: "page", pageBreakBefore: "always" }}>
                     {financialBreakdownBlock}
                   </div>
