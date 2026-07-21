@@ -34,6 +34,10 @@ export const PROPOSAL_STATUS_COMPLETE = "ready";
 export { snapshotDataScore, snapshotHasMeaningfulData };
 
 export function deriveProposalTitle(snapshot) {
+  const custom = String(snapshot?.proposalTitle || "").trim();
+  if (custom) {
+    return /proposal$/i.test(custom) ? custom : `${custom} Proposal`;
+  }
   const name = String(snapshot?.custName || "").trim();
   const address = String(snapshot?.custAddress || "").trim();
   if (name && address) return `${name} — ${address.slice(0, 40)}`;

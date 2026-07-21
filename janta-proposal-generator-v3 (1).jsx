@@ -5,7 +5,7 @@ import SiteMapEditor from "./src/SiteMapEditor.jsx";
 import SiteMapPreview from "./src/SiteMapPreview.jsx";
 import { bakeSiteMapToDataUrl } from "./src/siteMapBake.js";
 import { createEmptySiteMap, normalizeSiteMap, siteMapHasLayout } from "./src/siteMapModel.js";
-import { geocodeSiteAddress } from "./src/siteMapGeocode.js";
+import { geocodeSiteAddress, suggestSiteAddresses } from "./src/siteMapGeocode.js";
 import {
   activeEquipmentItems,
   collapseEquipmentForStorage,
@@ -1325,6 +1325,210 @@ function Field({ label, value, onChange, type = "text", unit, placeholder, disab
   );
 }
 
+/** Service Address field with address suggestions as the user types (no Find button). */
+function ServiceAddressSearch({ value, onChange, onSelectHit, placeholder = "Start typing an address…", biasLat, biasLng }) {
+  const wrapRef = useRef(null);
+  const suggestTimerRef = useRef(null);
+  const suggestAbortRef = useRef(null);
+  const skipSuggestRef = useRef(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const [suggestHighlight, setSuggestHighlight] = useState(-1);
+
+  function scheduleSuggest(text) {
+    if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
+    if (suggestAbortRef.current) {
+      suggestAbortRef.current.abort();
+      suggestAbortRef.current = null;
+    }
+    const q = text.trim();
+    if (q.length < 3) {
+      setSuggestions([]);
+      setSuggestOpen(false);
+      setSuggestLoading(false);
+      setSuggestHighlight(-1);
+      return;
+    }
+    setSuggestLoading(true);
+    suggestTimerRef.current = setTimeout(async () => {
+      const controller = new AbortController();
+      suggestAbortRef.current = controller;
+      try {
+        const hits = await suggestSiteAddresses(q, {
+          limit: 7,
+          signal: controller.signal,
+          biasLat: Number.isFinite(Number(biasLat)) ? Number(biasLat) : undefined,
+          biasLng: Number.isFinite(Number(biasLng)) ? Number(biasLng) : undefined,
+        });
+        if (controller.signal.aborted) return;
+        setSuggestions(hits);
+        setSuggestOpen(hits.length > 0);
+        setSuggestHighlight(hits.length ? 0 : -1);
+      } catch (err) {
+        if (err?.name === "AbortError") return;
+        setSuggestions([]);
+        setSuggestOpen(false);
+      } finally {
+        if (!controller.signal.aborted) setSuggestLoading(false);
+      }
+    }, 280);
+  }
+
+  function applyHit(hit, fallbackLabel = "") {
+    const label = hit.displayName || hit.primary || fallbackLabel || value.trim();
+    skipSuggestRef.current = true;
+    setSuggestOpen(false);
+    setSuggestions([]);
+    setSuggestHighlight(-1);
+    onChange(label);
+    onSelectHit?.(hit, label);
+  }
+
+  useEffect(() => {
+    const onDocDown = (e) => {
+      if (!wrapRef.current) return;
+      if (!wrapRef.current.contains(e.target)) {
+        setSuggestOpen(false);
+        setSuggestHighlight(-1);
+      }
+    };
+    document.addEventListener("mousedown", onDocDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocDown);
+      if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
+      if (suggestAbortRef.current) suggestAbortRef.current.abort();
+    };
+  }, []);
+
+  return (
+    <div style={{ marginBottom: 8, flex: "1 1 100%", minWidth: "100%", width: "100%" }}>
+      <label style={{ display: "block", color: C.g500, fontSize: 10, marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: fontSans }}>
+        Service Address
+      </label>
+      <div ref={wrapRef} style={{ position: "relative" }}>
+        <input
+          value={value}
+          onChange={(e) => {
+            const v = e.target.value;
+            onChange(v);
+            if (skipSuggestRef.current) {
+              skipSuggestRef.current = false;
+              return;
+            }
+            scheduleSuggest(v);
+          }}
+          onFocus={() => {
+            if (suggestions.length) setSuggestOpen(true);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown" && suggestOpen && suggestions.length) {
+              e.preventDefault();
+              setSuggestHighlight((i) => Math.min(suggestions.length - 1, (i < 0 ? -1 : i) + 1));
+              return;
+            }
+            if (e.key === "ArrowUp" && suggestOpen && suggestions.length) {
+              e.preventDefault();
+              setSuggestHighlight((i) => Math.max(0, (i < 0 ? 0 : i) - 1));
+              return;
+            }
+            if (e.key === "Escape") {
+              setSuggestOpen(false);
+              setSuggestHighlight(-1);
+              return;
+            }
+            if (e.key === "Enter" && suggestOpen && suggestions.length) {
+              e.preventDefault();
+              const idx = suggestHighlight >= 0 ? suggestHighlight : 0;
+              applyHit(suggestions[idx], value.trim());
+            }
+          }}
+          placeholder={placeholder}
+          autoComplete="off"
+          role="combobox"
+          aria-expanded={suggestOpen}
+          aria-autocomplete="list"
+          style={{
+            width: "100%",
+            padding: "8px 10px",
+            border: `1px solid ${C.g200}`,
+            borderRadius: 8,
+            fontSize: 13,
+            fontFamily: fontSans,
+            color: C.g700,
+            background: C.cream,
+            outline: "none",
+            boxSizing: "border-box",
+          }}
+        />
+        {suggestOpen && suggestions.length > 0 && (
+          <ul
+            role="listbox"
+            style={{
+              listStyle: "none",
+              margin: "4px 0 0",
+              padding: 4,
+              position: "absolute",
+              left: 0,
+              right: 0,
+              top: "100%",
+              zIndex: 1200,
+              maxHeight: 260,
+              overflowY: "auto",
+              background: C.white,
+              border: `1px solid ${C.g200}`,
+              borderRadius: 8,
+              boxShadow: "0 10px 28px rgba(0,0,0,0.16)",
+              fontFamily: fontSans,
+            }}
+          >
+            {suggestions.map((hit, idx) => {
+              const active = idx === suggestHighlight;
+              return (
+                <li key={hit.id || `${hit.lat},${hit.lng},${idx}`}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={active}
+                    onMouseEnter={() => setSuggestHighlight(idx)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      applyHit(hit, value.trim());
+                    }}
+                    style={{
+                      width: "100%",
+                      textAlign: "left",
+                      border: "none",
+                      borderRadius: 6,
+                      padding: "8px 10px",
+                      cursor: "pointer",
+                      background: active ? C.g100 : "transparent",
+                      color: C.navy,
+                      fontFamily: fontSans,
+                    }}
+                  >
+                    <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.3 }}>
+                      {hit.primary || hit.displayName}
+                    </div>
+                    {(hit.secondary || hit.displayName) && (
+                      <div style={{ fontSize: 11, color: C.g500, marginTop: 2, lineHeight: 1.35 }}>
+                        {hit.secondary || hit.displayName}
+                      </div>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {suggestLoading && value.trim().length >= 3 && !suggestOpen && (
+          <div style={{ fontSize: 10, color: C.g500, fontFamily: fontSans, marginTop: 4 }}>Searching addresses…</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Metric({ label, value, sub, color = C.navy, highlight, typeScale }) {
   const labelSize = typeScale?.label ?? 9;
   const valueSize = typeScale?.metric ?? 20;
@@ -1680,6 +1884,7 @@ export default function JantaProposal({
   // ── Extracted / editable customer data ──
   const [custName, setCustName] = useState("");
   const [custAddress, setCustAddress] = useState("");
+  const [proposalTitle, setProposalTitle] = useState("");
   const [custEmail, setCustEmail] = useState("");
   const [custPhone, setCustPhone] = useState("");
   const [account, setAccount] = useState("");
@@ -1839,6 +2044,7 @@ export default function JantaProposal({
     step,
     custName,
     custAddress,
+    proposalTitle,
     custEmail,
     custPhone,
     account,
@@ -1913,6 +2119,7 @@ export default function JantaProposal({
       setStep,
       setCustName,
       setCustAddress,
+      setProposalTitle,
       setCustEmail,
       setCustPhone,
       setAccount,
@@ -3962,7 +4169,36 @@ export default function JantaProposal({
                   {extracted && <span style={{ fontSize: 9, color: C.green, fontFamily: fontSans, background: `${C.green}11`, padding: "2px 6px", borderRadius: 8 }}>Extracted</span>}
                 </div>
                 <Field label="Customer Name" value={custName} onChange={setCustName} placeholder="Sean Simmons" />
-                <Field label="Service Address" value={custAddress} onChange={setCustAddress} placeholder="2265 Monitor St, Dallas TX, 75207" wide />
+                <ServiceAddressSearch
+                  value={custAddress}
+                  onChange={setCustAddress}
+                  placeholder="Start typing an address…"
+                  biasLat={siteLat}
+                  biasLng={siteLon}
+                  onSelectHit={(hit, label) => {
+                    setSiteAddress(label);
+                    siteAddressManualRef.current = false;
+                    if (Number.isFinite(Number(hit?.lat)) && Number.isFinite(Number(hit?.lng))) {
+                      setSiteLat(hit.lat);
+                      setSiteLon(hit.lng);
+                      setSiteMap((prev) => normalizeSiteMap({
+                        ...prev,
+                        address: label,
+                        lat: hit.lat,
+                        lng: hit.lng,
+                        bakedImageDataUrl: null,
+                      }));
+                    }
+                  }}
+                />
+                <Field
+                  label="Proposal Title"
+                  value={proposalTitle}
+                  onChange={setProposalTitle}
+                  placeholder="2265 Monitor St"
+                  wide
+                  inlineUnit="Proposal"
+                />
                 <div style={{ display: "flex", gap: 8 }}>
                   <Field label="Email" value={custEmail} onChange={setCustEmail} placeholder="email@example.com" />
                   <Field label="Phone" value={custPhone} onChange={setCustPhone} placeholder="(123) 456-7890" />
@@ -4635,12 +4871,14 @@ export default function JantaProposal({
             {siteMapHasLayout(siteMap) && renderProposalPreviewShell(
               "Site Map",
               <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}` }}>
-                <h3 style={{ margin: "0 0 8px 0", fontSize: 18, fontWeight: 700, color: titleColor }}>Site Map</h3>
-                {(siteMap.address || custAddress) ? (
-                  <p style={{ margin: "0 0 10px 0", color: C.g500, fontSize: 11, fontFamily: fontSans }}>
-                    {siteMap.address || custAddress}
-                  </p>
-                ) : null}
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
+                  <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: titleColor, flexShrink: 0 }}>Site Map</h3>
+                  {(siteMap.address || custAddress) ? (
+                    <p style={{ margin: 0, color: C.g500, fontSize: 11, fontFamily: fontSans, lineHeight: 1.45, textAlign: "right", flex: 1, minWidth: 0 }}>
+                      {siteMap.address || custAddress}
+                    </p>
+                  ) : null}
+                </div>
                 <SiteMapPreview
                   siteMap={siteMap}
                   height={280}
@@ -5293,13 +5531,13 @@ export default function JantaProposal({
                 <div style={{ background: C.navy, borderRadius: 10, padding: coverPad, color: proposalScreenDark ? "#F8F2E8" : C.white }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                     <div>
-                      <div style={{ height: 44, marginBottom: 4, paddingLeft: 0, paddingTop: 0, overflow: "hidden" }}>
+                      <div style={{ height: 50, marginBottom: 6, paddingLeft: 0, paddingTop: 0, overflow: "hidden" }}>
                         <img
                           crossOrigin="anonymous"
                           src={jantaPublicAssetUrl("/assets/janta-logo-cropped.svg")}
                           alt="Janta Power"
                           style={{
-                            height: 48,
+                            height: 54,
                             width: "auto",
                             display: "block",
                             objectFit: "contain",
@@ -5308,7 +5546,7 @@ export default function JantaProposal({
                           }}
                         />
                       </div>
-                      <h2 style={{ margin: "0 0 4px 0", fontSize: PT.coverTitle, fontWeight: 700, fontFamily: fontSans, color: proposalScreenDark ? "#F8F2E8" : undefined, lineHeight: 1.25 }}>{custAddress || "Solar"} Proposal</h2>
+                      <h2 style={{ margin: "0 0 4px 0", fontSize: PT.coverTitle, fontWeight: 700, fontFamily: fontSans, color: proposalScreenDark ? "#F8F2E8" : undefined, lineHeight: 1.25 }}>{(proposalTitle || custAddress || "Solar").trim()} Proposal</h2>
                       {multiMeterMode && (
                         <p style={{ margin: "0 0 4px 0", color: C.gold, fontSize: PT.coverMeta, fontFamily: fontSans, fontWeight: 600 }}>
                           {meters.length} meters · {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} combined
@@ -5316,22 +5554,22 @@ export default function JantaProposal({
                       )}
                       <p style={{ margin: 0, color: proposalScreenDark ? "#D5C7B7" : "rgba(255,255,255,0.5)", fontSize: PT.coverMeta, fontFamily: fontSans }}>{new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" })}</p>
                     </div>
-                    <div style={{ textAlign: "right", fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.4 }}>
-                      <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginBottom: 2, fontSize: PT.label, textTransform: "uppercase", letterSpacing: "0.04em" }}>Prepared For</div>
+                    <div style={{ textAlign: "right", fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.45 }}>
+                      <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginBottom: 4, fontSize: PT.label, textTransform: "uppercase", letterSpacing: "0.04em" }}>Prepared For</div>
                       <div style={{ fontWeight: 600, fontSize: PT.bodySm, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{custName || "—"}</div>
                       <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custEmail}</div>
                       <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custPhone}</div>
-                      <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginTop: 8, marginBottom: 2, fontSize: PT.label, textTransform: "uppercase", letterSpacing: "0.04em" }}>Prepared By</div>
+                      <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginTop: 10, marginBottom: 4, fontSize: PT.label, textTransform: "uppercase", letterSpacing: "0.04em" }}>Prepared By</div>
                       <div style={{ fontWeight: 600, fontSize: PT.bodySm, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{prepBy}</div>
                       <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepEmail}</div>
                       <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepPhone}</div>
                     </div>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 12 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 14 }}>
                     {[[formatSystemWithUnit(effectiveSizeProject, useMwDisplay), multiMeterMode ? "Total System Size" : "System Size"], ["25+ Yrs", "Lifespan"], [formatArea(landReq), "Land Required"], [formatArea(landCons), "Land Conserved"]].map(([v, l]) => (
-                      <div key={l} style={{ background: "rgba(255,255,255,0.07)", borderRadius: 6, padding: "10px 8px", textAlign: "center" }}>
+                      <div key={l} style={{ background: "rgba(255,255,255,0.07)", borderRadius: 6, padding: "12px 10px", textAlign: "center" }}>
                         <div style={{ fontSize: PT.coverStat, fontWeight: 700, color: C.gold, fontFamily: fontSans, lineHeight: 1.15 }}>{v}</div>
-                        <div style={{ fontSize: PT.coverStatLabel, color: "rgba(255,255,255,0.45)", fontFamily: fontSans, marginTop: 3, textTransform: "uppercase", letterSpacing: "0.04em" }}>{l}</div>
+                        <div style={{ fontSize: PT.coverStatLabel, color: "rgba(255,255,255,0.45)", fontFamily: fontSans, marginTop: 4, textTransform: "uppercase", letterSpacing: "0.04em" }}>{l}</div>
                       </div>
                     ))}
                   </div>
@@ -5373,36 +5611,39 @@ export default function JantaProposal({
                 ? (productionOnlyMode ? "Project Production (All Meters Combined)" : "Project Totals (All Meters Combined)")
                 : proposalFinancialSectionTitle;
 
-              const firstPageSiteMapH = compactFirstPageBundle ? 240 : 280;
+              // Bake is 720×350 — render at natural aspect (no stretch / crop window).
+              const siteMapBakeW = 720;
+              const siteMapBakeH = 350;
               const introSiteBlock = (
                 <div
                   style={{
                     background: C.white,
                     borderRadius: 10,
-                    padding: sectionPad,
+                    padding: 14,
                     border: `1px solid ${C.g200}`,
+                    breakInside: "avoid",
+                    pageBreakInside: "avoid",
                   }}
                 >
-                  {sectionTitle("Proposal Overview")}
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 8px 0` }}>
+                  <h3 style={{ margin: "0 0 8px 0", fontSize: PT.section, fontWeight: 700, color: titleColor, fontFamily: fontSans }}>
+                    Proposal Overview
+                  </h3>
+                  <p style={{ color: C.g700, fontSize: 12.5, lineHeight: 1.5, fontFamily: fontSans, margin: "0 0 8px 0" }}>
                     Janta Power pioneers three-dimensional solar tower technology, delivering greater energy output per square foot than conventional flat solar arrays. This proposal outlines the projected savings, space requirements, energy production, and return on investment for your site.
                   </p>
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 8px 0` }}>
-                    This document is a preliminary proposal and does not constitute a binding contract or a commitment by either party to proceed with installation. It serves as authorization for Janta Power to begin project pre-development, as described below.
+                  <p style={{ color: C.g700, fontSize: 12.5, lineHeight: 1.5, fontFamily: fontSans, margin: "0 0 8px 0" }}>
+                    This document is a preliminary proposal and does not constitute a binding contract or a commitment by either party to proceed with installation. Pricing, system design, and final terms remain subject to change based on findings from the project pre-development phase.
                   </p>
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 2px 0` }}>
-                    Upon signature, we will begin project preparation, including:
+                  <p style={{ color: C.g700, fontSize: 12.5, lineHeight: 1.5, fontFamily: fontSans, margin: "0 0 3px 0" }}>
+                    This proposal only serves as authorization for Janta Power to begin project preparation, as described below:
                   </p>
-                  <ul style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 8px 0`, paddingLeft: 22 }}>
+                  <ul style={{ color: C.g700, fontSize: 12.5, lineHeight: 1.5, fontFamily: fontSans, margin: "0 0 8px 0", paddingLeft: 20 }}>
                     <li>An initial site survey</li>
                     <li>Soil testing</li>
                     <li>Follow-up inspections to confirm interconnection points and site conditions</li>
                   </ul>
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: `0 0 8px 0` }}>
-                    Pricing, system design, and final terms remain subject to change based on findings from the project pre-development phase. Once complete, we will prepare a separate installation contract for your review and signature before any installation work begins.
-                  </p>
-                  <p style={{ color: C.g700, fontSize: PT.body, lineHeight: 1.5, fontFamily: fontSans, margin: 0 }}>
-                    Please review the details below and reach out with any questions. If you'd like to proceed, sign at the bottom of this page to authorize the next steps.
+                  <p style={{ color: C.g700, fontSize: 12.5, lineHeight: 1.5, fontFamily: fontSans, margin: 0 }}>
+                    Please review the details below. If you have any questions, don't hesitate to reach out and we'll assist you shortly.
                   </p>
                 </div>
               );
@@ -5412,22 +5653,36 @@ export default function JantaProposal({
                   style={{
                     background: C.white,
                     borderRadius: 10,
-                    padding: sectionPad,
+                    padding: 12,
                     border: `1px solid ${C.g200}`,
                     breakInside: "avoid",
                     pageBreakInside: "avoid",
                   }}
                 >
-                  {sectionTitle("Site Map")}
-                  {(siteMap.address || custAddress) ? (
-                    <p style={{ margin: `0 0 8px 0`, color: C.g500, fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.4 }}>{siteMap.address || custAddress}</p>
-                  ) : null}
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "baseline",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      marginBottom: 6,
+                    }}
+                  >
+                    <h3 style={{ margin: 0, fontSize: PT.section, fontWeight: 700, color: titleColor, fontFamily: fontSans, flexShrink: 0 }}>
+                      Site Map
+                    </h3>
+                    {(siteMap.address || custAddress) ? (
+                      <p style={{ margin: 0, color: C.g500, fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.45, textAlign: "right", flex: 1, minWidth: 0 }}>
+                        {siteMap.address || custAddress}
+                      </p>
+                    ) : null}
+                  </div>
                   {siteMap.bakedImageDataUrl ? (
                     <img
                       src={siteMap.bakedImageDataUrl}
                       alt="Site map with proposed solar towers"
-                      width={720}
-                      height={350}
+                      width={siteMapBakeW}
+                      height={siteMapBakeH}
                       style={{
                         display: "block",
                         width: "100%",
@@ -5439,7 +5694,7 @@ export default function JantaProposal({
                   ) : pdfExporting ? null : (
                     <SiteMapPreview
                       siteMap={siteMap}
-                      height={firstPageSiteMapH}
+                      height={siteMapBakeH}
                       interactive
                       onZoomChange={(zoom) => {
                         setSiteMap((prev) => {
@@ -5516,11 +5771,12 @@ export default function JantaProposal({
                 </div>
               );
 
-              const firstPageBlocks = (
+              // Cover + site map + compacted overview — keep as siblings so page-break avoid can apply per block.
+              const firstPageLead = (
                 <>
                   {coverBlock}
-                  {introSiteBlock}
                   {siteMapBlock}
+                  {introSiteBlock}
                 </>
               );
 
@@ -5529,7 +5785,7 @@ export default function JantaProposal({
                 const restMeters = meterBundles.slice(1);
                 return (
                   <>
-                    {firstPageBlocks}
+                    {firstPageLead}
                     <div
                       style={{
                         display: "flex",
@@ -5579,7 +5835,7 @@ export default function JantaProposal({
 
               return (
                 <>
-                  {firstPageBlocks}
+                  {firstPageLead}
                   <div style={{ breakBefore: "page", pageBreakBefore: "always" }}>
                     {financialBreakdownBlock}
                   </div>

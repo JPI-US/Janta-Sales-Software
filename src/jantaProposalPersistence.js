@@ -8,6 +8,7 @@ export function buildProposalSnapshot(s) {
     step: s.step,
     custName: s.custName,
     custAddress: s.custAddress,
+    proposalTitle: s.proposalTitle,
     custEmail: s.custEmail,
     custPhone: s.custPhone,
     account: s.account,
@@ -85,6 +86,7 @@ export function applyProposalSnapshot(snapshot, setters) {
   set(setters.setStep, snapshot.step ?? 0);
   set(setters.setCustName, snapshot.custName ?? "");
   set(setters.setCustAddress, snapshot.custAddress ?? "");
+  set(setters.setProposalTitle, snapshot.proposalTitle ?? "");
   set(setters.setCustEmail, snapshot.custEmail ?? "");
   set(setters.setCustPhone, snapshot.custPhone ?? "");
   set(setters.setAccount, snapshot.account ?? "");
