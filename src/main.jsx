@@ -1,191 +1,13 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/inter/700.css";
 import ProposalApp from "./ProposalApp.jsx";
+import * as authApi from "./authApi.js";
+import { slugifyUsername, uniqueUsernameFromDisplayName } from "../shared/authUsername.js";
 
-const DB_KEY = "janta_local_db_v1";
-const SESSION_KEY = "janta_local_session_v1";
-const REMEMBER_KEY = "janta_local_saved_login_v1";
 const THEME_KEY = "janta_dark_mode_v1";
-
-/** Lowercase emails that always have Settings → user management (local app). Add more admins here only. */
-const ADMIN_EMAIL_ALLOWLIST = new Set(["seansimmons@jantaus.com"]);
-
-/** Admin-managed user list (bootstrap): seeded on first run / merge. */
-const ADMIN_SEED_USERS = [
-  {
-    name: "Sean Simmons",
-    username: "sean",
-    email: "seansimmons@jantaus.com",
-    password: "CyanRyan05",
-    isAdmin: true,
-  },
-];
-
-function normalizeLoginId(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function defaultUsernameFromEmail(email) {
-  const local = String(email || "").split("@")[0].trim().toLowerCase();
-  return local || "";
-}
-
-function slugifyUsername(name) {
-  const slug = String(name || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-    .slice(0, 32);
-  return slug;
-}
-
-function uniqueUsernameFromDisplayName(name, email, users, excludeUserId = "") {
-  const taken = new Set(
-    users
-      .filter((u) => u.id !== excludeUserId)
-      .map((u) => String(u.username || "").toLowerCase())
-      .filter(Boolean)
-  );
-  let base = slugifyUsername(name) || defaultUsernameFromEmail(email);
-  if (!base) base = "user";
-  let candidate = base;
-  let n = 2;
-  while (taken.has(candidate)) {
-    candidate = `${base}${n}`;
-    n += 1;
-  }
-  return candidate;
-}
-
-function isProtectedAdminAccount(user) {
-  return ADMIN_EMAIL_ALLOWLIST.has(String(user?.email || "").toLowerCase());
-}
-
-function normalizeUserRecord(user) {
-  const email = String(user.email || "").trim().toLowerCase();
-  return {
-    ...user,
-    email,
-    username: String(user.username || defaultUsernameFromEmail(email)).trim().toLowerCase(),
-  };
-}
-
-function userMatchesLogin(user, loginId, pass) {
-  if (!user || user.password !== pass) return false;
-  const id = normalizeLoginId(loginId);
-  if (!id) return false;
-  const email = String(user.email || "").toLowerCase();
-  const username = String(user.username || "").toLowerCase();
-  return email === id || (username && username === id);
-}
-
-function updateRememberedCredentials(patch) {
-  try {
-    const raw = localStorage.getItem(REMEMBER_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (!parsed?.remember) return;
-    localStorage.setItem(
-      REMEMBER_KEY,
-      JSON.stringify({
-        email: patch.email != null ? patch.email : String(parsed.email || ""),
-        password: patch.password != null ? patch.password : String(parsed.password || ""),
-        remember: true,
-      })
-    );
-  } catch (_err) {
-    // ignore
-  }
-}
-
-function userIsAdmin(u) {
-  if (!u || !u.email) return false;
-  const email = String(u.email).trim().toLowerCase();
-  if (ADMIN_EMAIL_ALLOWLIST.has(email)) return true;
-  return Boolean(u.isAdmin === true || u.role === "admin");
-}
-
-function readDb() {
-  try {
-    const raw = localStorage.getItem(DB_KEY);
-    if (!raw) return { users: [] };
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.users)) return { users: [] };
-    return { users: parsed.users.map(normalizeUserRecord) };
-  } catch (_err) {
-    return { users: [] };
-  }
-}
-
-function writeDb(db) {
-  localStorage.setItem(DB_KEY, JSON.stringify(db));
-}
-
-function readSession() {
-  return localStorage.getItem(SESSION_KEY) || "";
-}
-
-function writeSession(userId) {
-  if (!userId) {
-    localStorage.removeItem(SESSION_KEY);
-    return;
-  }
-  localStorage.setItem(SESSION_KEY, userId);
-}
-
-function ensureSeedUsers(db) {
-  if (!ADMIN_SEED_USERS.length) return db;
-  const byEmail = new Map(
-    db.users.map((u) => [String(u.email || "").toLowerCase(), { ...u }])
-  );
-  let changed = false;
-  ADMIN_SEED_USERS.forEach((seed) => {
-    const email = String(seed.email || "").trim().toLowerCase();
-    if (!email || !seed.password) return;
-    const seedAdmin = Boolean(seed.isAdmin) || ADMIN_EMAIL_ALLOWLIST.has(email);
-    const existing = byEmail.get(email);
-    if (existing) {
-      const next = normalizeUserRecord({
-        ...existing,
-        name: seed.name || existing.name || email,
-        username: existing.username || seed.username || defaultUsernameFromEmail(email),
-        // Keep password the user chose; seed password only applies when creating the account.
-        password: existing.password || seed.password,
-        isAdmin: seedAdmin || userIsAdmin(existing),
-      });
-      byEmail.set(email, next);
-      changed =
-        changed ||
-        existing.password !== next.password ||
-        existing.name !== next.name ||
-        existing.username !== next.username ||
-        Boolean(existing.isAdmin) !== Boolean(next.isAdmin);
-      return;
-    }
-    changed = true;
-    byEmail.set(email, normalizeUserRecord({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      name: seed.name || email,
-      username: seed.username || defaultUsernameFromEmail(email),
-      email,
-      password: seed.password,
-      isAdmin: seedAdmin,
-      createdAt: new Date().toISOString(),
-      lastLoginAt: null,
-    }));
-  });
-  const users = Array.from(byEmail.values()).map((u) => {
-    const normalized = normalizeUserRecord(u);
-    const email = String(normalized.email || "").toLowerCase();
-    const mustAdmin = ADMIN_EMAIL_ALLOWLIST.has(email);
-    if (mustAdmin && !normalized.isAdmin) {
-      changed = true;
-      return { ...normalized, isAdmin: true };
-    }
-    return normalized;
-  });
-  return { ...db, users };
-}
 
 function isSettingsSuccessMessage(msg) {
   if (!msg || typeof msg !== "string") return false;
@@ -193,29 +15,12 @@ function isSettingsSuccessMessage(msg) {
 }
 
 function AuthGate() {
-  const [db, setDb] = useState(() => {
-    const seeded = ensureSeedUsers(readDb());
-    writeDb(seeded);
-    return seeded;
-  });
-  const [sessionUserId, setSessionUserId] = useState("");
-  const savedLogin = useMemo(() => {
-    try {
-      const raw = localStorage.getItem(REMEMBER_KEY);
-      if (!raw) return { email: "", password: "", remember: false };
-      const parsed = JSON.parse(raw);
-      return {
-        email: String(parsed.email || ""),
-        password: String(parsed.password || ""),
-        remember: Boolean(parsed.remember),
-      };
-    } catch (_err) {
-      return { email: "", password: "", remember: false };
-    }
-  }, []);
-  const [loginId, setLoginId] = useState(savedLogin.email);
-  const [password, setPassword] = useState(savedLogin.password);
-  const [rememberLogin, setRememberLogin] = useState(savedLogin.remember);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [teamMembers, setTeamMembers] = useState([]);
+  const [loginId, setLoginId] = useState("");
+  const [password, setPassword] = useState("");
+  const [rememberLogin, setRememberLogin] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -237,13 +42,14 @@ function AuthGate() {
     }
   });
 
-  const currentUser = useMemo(
-    () => db.users.find((u) => u.id === sessionUserId) || null,
-    [db.users, sessionUserId]
-  );
-  const currentUserIsAdmin = userIsAdmin(currentUser);
-  React.useEffect(() => {
-    writeSession("");
+  const currentUserIsAdmin = Boolean(currentUser?.isAdmin);
+
+  useEffect(() => {
+    authApi
+      .fetchCurrentUser()
+      .then((user) => setCurrentUser(user))
+      .catch(() => setCurrentUser(null))
+      .finally(() => setAuthLoading(false));
   }, []);
 
   function resetForm() {
@@ -251,40 +57,26 @@ function AuthGate() {
     setPassword("");
   }
 
-  function handleSignIn() {
-    const id = normalizeLoginId(loginId);
-    const user = db.users.find((u) => userMatchesLogin(u, id, password));
-    if (!user) {
-      setError("Invalid username/email or password.");
-      return;
+  async function handleSignIn() {
+    try {
+      const user = await authApi.login(loginId.trim(), password, rememberLogin);
+      setCurrentUser(user);
+      setError("");
+      resetForm();
+    } catch (err) {
+      setError(err.message || "Invalid username/email or password.");
     }
-    const nextDb = {
-      ...db,
-      users: db.users.map((u) =>
-        u.id === user.id ? { ...u, lastLoginAt: new Date().toISOString() } : u
-      ),
-    };
-    const merged = ensureSeedUsers(nextDb);
-    setDb(merged);
-    writeDb(merged);
-    setSessionUserId(user.id);
-    writeSession(user.id);
-    if (rememberLogin) {
-      localStorage.setItem(
-        REMEMBER_KEY,
-        JSON.stringify({ email: user.email, password, remember: true })
-      );
-    } else {
-      localStorage.removeItem(REMEMBER_KEY);
-    }
-    setError("");
-    resetForm();
   }
 
-  function handleSignOut() {
-    const uid = sessionUserId;
-    setSessionUserId("");
-    writeSession("");
+  async function handleSignOut() {
+    const uid = currentUser?.id;
+    try {
+      await authApi.logout();
+    } catch (_err) {
+      // ignore — cookie is cleared client-side regardless
+    }
+    setCurrentUser(null);
+    setTeamMembers([]);
     setSettingsOpen(false);
     setSettingsMsg("");
     if (uid) {
@@ -309,40 +101,42 @@ function AuthGate() {
     setAddUserConfirm("");
     setSettingsMsg("");
     setSettingsOpen(true);
+    if (currentUserIsAdmin) {
+      authApi
+        .listTeam()
+        .then(setTeamMembers)
+        .catch(() => setTeamMembers([]));
+    }
   }
 
-  /** Only removable if not you and not a built-in admin account. */
+  /** Only removable if not you and not a protected (bootstrap) admin account. */
   function canRemoveUser(target) {
     if (!target || !currentUser) return false;
     if (target.id === currentUser.id) return false;
-    if (ADMIN_EMAIL_ALLOWLIST.has(String(target.email || "").toLowerCase())) return false;
+    if (target.protected) return false;
     return currentUserIsAdmin;
   }
 
   function canChangeUserRole(target) {
     if (!currentUserIsAdmin || !target || !currentUser) return false;
     if (target.id === currentUser.id) return false;
-    if (isProtectedAdminAccount(target)) return false;
+    if (target.protected) return false;
     return true;
   }
 
-  function setUserRole(target, nextIsAdmin) {
+  async function setUserRole(target, nextIsAdmin) {
     if (!canChangeUserRole(target)) return;
     const wantAdmin = Boolean(nextIsAdmin);
-    const nextDb = ensureSeedUsers({
-      ...db,
-      users: db.users.map((u) =>
-        u.id === target.id
-          ? { ...u, isAdmin: wantAdmin, role: wantAdmin ? "admin" : "member" }
-          : u
-      ),
-    });
-    setDb(nextDb);
-    writeDb(nextDb);
-    setSettingsMsg(`Role updated: ${target.name || target.username} is now ${wantAdmin ? "Admin" : "Member"}.`);
+    try {
+      const updated = await authApi.setTeamMemberRole(target.id, wantAdmin);
+      setTeamMembers((prev) => prev.map((u) => (u.id === target.id ? updated : u)));
+      setSettingsMsg(`Role updated: ${target.name || target.username} is now ${wantAdmin ? "Admin" : "Member"}.`);
+    } catch (err) {
+      setSettingsMsg(err.message || "Could not update role.");
+    }
   }
 
-  function addInviteUser() {
+  async function addInviteUser() {
     if (!currentUser || !currentUserIsAdmin) return;
     const name = addUserName.trim();
     const cleanEmail = addUserEmail.trim().toLowerCase();
@@ -366,56 +160,36 @@ function AuthGate() {
       setSettingsMsg("Password and confirm password must match.");
       return;
     }
-    if (db.users.some((u) => String(u.email).toLowerCase() === cleanEmail)) {
-      setSettingsMsg("That email is already registered.");
-      return;
+    try {
+      const created = await authApi.addTeamMember(name, cleanEmail, addUserPassword);
+      setTeamMembers((prev) => [...prev, created]);
+      setSettingsMsg("User added.");
+      setAddUserName("");
+      setAddUserEmail("");
+      setAddUserPassword("");
+      setAddUserConfirm("");
+    } catch (err) {
+      setSettingsMsg(err.message || "Could not add user.");
     }
-    const username = uniqueUsernameFromDisplayName(name, cleanEmail, db.users);
-    const newUser = normalizeUserRecord({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      name,
-      username,
-      email: cleanEmail,
-      password: addUserPassword,
-      isAdmin: false,
-      role: "member",
-      createdBy: currentUser.id,
-      createdAt: new Date().toISOString(),
-      lastLoginAt: null,
-    });
-    if (ADMIN_EMAIL_ALLOWLIST.has(cleanEmail)) {
-      newUser.isAdmin = true;
-    }
-    const nextDb = ensureSeedUsers({ ...db, users: [...db.users, newUser] });
-    setDb(nextDb);
-    writeDb(nextDb);
-    setSettingsMsg("User added.");
-    setAddUserName("");
-    setAddUserEmail("");
-    setAddUserPassword("");
-    setAddUserConfirm("");
   }
 
-  function removeInviteUser(target) {
+  async function removeInviteUser(target) {
     if (!canRemoveUser(target)) return;
-    const nextDb = ensureSeedUsers({
-      ...db,
-      users: db.users.filter((u) => u.id !== target.id),
-    });
-    setDb(nextDb);
-    writeDb(nextDb);
-    setSettingsMsg("User removed.");
+    try {
+      await authApi.removeTeamMember(target.id);
+      setTeamMembers((prev) => prev.filter((u) => u.id !== target.id));
+      setSettingsMsg("User removed.");
+    } catch (err) {
+      setSettingsMsg(err.message || "Could not remove user.");
+    }
   }
-  function saveEmail() {
+
+  async function saveEmail() {
     if (!currentUser) return;
     const currentEmailInput = settingsCurrentEmail.trim().toLowerCase();
     const cleanEmail = settingsNewEmail.trim().toLowerCase();
     if (!currentEmailInput) {
       setSettingsMsg("Current email is required.");
-      return;
-    }
-    if (currentEmailInput !== currentUser.email) {
-      setSettingsMsg("Current email does not match your account.");
       return;
     }
     if (!cleanEmail) {
@@ -426,45 +200,22 @@ function AuthGate() {
       setSettingsMsg("Enter current password to save changes.");
       return;
     }
-    if (currentPassword !== currentUser.password) {
-      setSettingsMsg("Current password is incorrect.");
-      return;
+    try {
+      const updated = await authApi.updateEmail(currentEmailInput, cleanEmail, currentPassword);
+      setCurrentUser(updated);
+      setSettingsMsg("Email updated.");
+      setSettingsCurrentEmail(updated.email);
+      setSettingsNewEmail("");
+      setCurrentPassword("");
+    } catch (err) {
+      setSettingsMsg(err.message || "Could not update email.");
     }
-    const emailTaken = db.users.some(
-      (u) => u.id !== currentUser.id && u.email === cleanEmail
-    );
-    if (emailTaken) {
-      setSettingsMsg("That email is already used by another account.");
-      return;
-    }
-    const nextDb = {
-      ...db,
-      users: db.users.map((u) =>
-        u.id === currentUser.id
-          ? {
-              ...u,
-              email: cleanEmail,
-            }
-          : u
-      ),
-    };
-    const merged = ensureSeedUsers(nextDb);
-    setDb(merged);
-    writeDb(merged);
-    setSettingsMsg("Email updated.");
-    setSettingsCurrentEmail(cleanEmail);
-    setSettingsNewEmail("");
-    updateRememberedCredentials({ email: cleanEmail });
   }
 
-  function savePassword() {
+  async function savePassword() {
     if (!currentUser) return;
     if (!currentPassword) {
       setSettingsMsg("Enter current password to change password.");
-      return;
-    }
-    if (currentPassword !== currentUser.password) {
-      setSettingsMsg("Current password is incorrect.");
       return;
     }
     if (!newPassword) {
@@ -479,20 +230,23 @@ function AuthGate() {
       setSettingsMsg("New password and confirm password must match.");
       return;
     }
-    const nextDb = {
-      ...db,
-      users: db.users.map((u) =>
-        u.id === currentUser.id ? { ...u, password: newPassword } : u
-      ),
-    };
-    const merged = ensureSeedUsers(nextDb);
-    setDb(merged);
-    writeDb(merged);
-    setSettingsMsg("Password updated.");
-    setCurrentPassword("");
-    setNewPassword("");
-    setConfirmPassword("");
-    updateRememberedCredentials({ password: newPassword });
+    try {
+      await authApi.updatePassword(currentPassword, newPassword);
+      setSettingsMsg("Password updated.");
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (err) {
+      setSettingsMsg(err.message || "Could not update password.");
+    }
+  }
+
+  if (authLoading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#0F141A" }}>
+        <div style={{ color: "#8FA0B3", fontFamily: "Inter, system-ui, sans-serif", fontSize: 13 }}>Loading…</div>
+      </div>
+    );
   }
 
   if (currentUser) {
@@ -603,18 +357,18 @@ function AuthGate() {
               <div style={{ marginBottom: 12, padding: 12, border: `1px solid ${panelBorder}`, borderRadius: 8 }}>
                 <div style={{ fontSize: 12, color: subtleText, marginBottom: 4 }}>User management</div>
                 <p style={{ margin: "0 0 12px 0", fontSize: 11, color: subtleText, lineHeight: 1.45 }}>
-                  Manage team sign-in accounts on this device. Display name becomes their username for login.
+                  Manage team sign-in accounts. Display name becomes their username for login.
                 </p>
 
                 <div style={{ marginBottom: 14, paddingBottom: 12, borderBottom: `1px solid ${panelBorder}` }}>
                   <div style={{ fontSize: 11, fontWeight: 600, color: headingColor, marginBottom: 10 }}>
-                    Team members ({db.users.length})
+                    Team members ({teamMembers.length})
                   </div>
-                  {db.users.length === 0 ? (
+                  {teamMembers.length === 0 ? (
                     <div style={{ fontSize: 12, color: subtleText }}>No accounts yet.</div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {[...db.users]
+                      {[...teamMembers]
                         .sort((a, b) => {
                           const aYou = a.id === currentUser.id ? 0 : 1;
                           const bYou = b.id === currentUser.id ? 0 : 1;
@@ -623,7 +377,7 @@ function AuthGate() {
                         })
                         .map((u) => {
                           const isYou = u.id === currentUser.id;
-                          const admin = userIsAdmin(u);
+                          const admin = Boolean(u.isAdmin);
                           return (
                             <div
                               key={u.id}
@@ -680,7 +434,7 @@ function AuthGate() {
                                     }}
                                   >
                                     {admin ? "Admin" : "Member"}
-                                    {isProtectedAdminAccount(u) ? " · Protected" : ""}
+                                    {u.protected ? " · Protected" : ""}
                                   </span>
                                 )}
                                 {!isYou && canRemoveUser(u) && (
@@ -718,7 +472,7 @@ function AuthGate() {
                 />
                 {addUserName.trim() && (
                   <div style={{ fontSize: 11, color: subtleText, margin: "-4px 0 8px 0" }}>
-                    Sign-in username: <strong style={{ color: headingColor }}>@{uniqueUsernameFromDisplayName(addUserName, addUserEmail, db.users)}</strong>
+                    Sign-in username: <strong style={{ color: headingColor }}>@{uniqueUsernameFromDisplayName(addUserName, addUserEmail, teamMembers)}</strong>
                   </div>
                 )}
                 <input
@@ -923,7 +677,7 @@ function AuthGate() {
             checked={rememberLogin}
             onChange={(e) => setRememberLogin(e.target.checked)}
           />
-          Save login and password
+          Stay signed in on this device
         </label>
 
         {error && (

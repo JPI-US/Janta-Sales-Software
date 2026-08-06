@@ -1,15 +1,17 @@
 import http from "http";
 import "./loadEnv.js";
-import { createProposalsApiHandler, DEFAULT_DATA_DIR } from "./proposalsApi.js";
+import { createApiHandler } from "./apiHandler.js";
+import { DEFAULT_DATA_DIR } from "./proposalsApi.js";
+import { DEFAULT_AUTH_DATA_DIR } from "./auth/userStore.js";
+import { applyCorsHeaders } from "./cors.js";
 
 const port = Number(process.env.PORT || 3001);
 const dataDir = process.env.PROPOSALS_DATA_DIR || DEFAULT_DATA_DIR;
-const handler = createProposalsApiHandler({ dataDir });
+const authDataDir = process.env.AUTH_DATA_DIR || DEFAULT_AUTH_DATA_DIR;
+const handler = createApiHandler({ dataDir, authDataDir });
 
 const server = http.createServer((req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  applyCorsHeaders(req, res, { allowedOrigin: process.env.CORS_ORIGIN });
   if (req.method === "OPTIONS") {
     res.statusCode = 204;
     res.end();

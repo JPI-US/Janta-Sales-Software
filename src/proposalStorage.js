@@ -1,5 +1,5 @@
 import { dedupeProposalList } from "../shared/proposalDedupe.js";
-import { isLegacyRandomUserId, proposalStorageKey } from "./proposalAccount.js";
+import { isLegacyRandomUserId, proposalStorageKey } from "../shared/proposalAccount.js";
 import {
   mergeProposalLists,
   readLocalProposals,
@@ -21,7 +21,7 @@ import {
 } from "./proposalsCloudApi.js";
 import { dedupeProposalsCloud } from "./hubspotApi.js";
 
-export { proposalStorageKey, isLegacyRandomUserId } from "./proposalAccount.js";
+export { proposalStorageKey, isLegacyRandomUserId } from "../shared/proposalAccount.js";
 export { createProposalCloud, upsertProposalCloud } from "./proposalsCloudApi.js";
 
 export const PROPOSAL_STATUS_IN_PROGRESS = "in_progress";

@@ -8,6 +8,10 @@ import {
   syncAccountWithHubSpot,
 } from "./hubspot.js";
 import { dedupeProposalList } from "../shared/proposalDedupe.js";
+import { proposalStorageKey } from "../shared/proposalAccount.js";
+import { readJson, writeJson, readBody, send } from "./httpUtils.js";
+import { authenticateRequest } from "./auth/sessions.js";
+import { DEFAULT_AUTH_DATA_DIR } from "./auth/userStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_DATA_DIR = path.resolve(__dirname, "../data/cloud-proposals");
@@ -30,44 +34,6 @@ function ensureUserDir(dataDir, userId) {
   const dir = userDir(dataDir, userId);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
-}
-
-function readJson(filePath, fallback) {
-  try {
-    if (!fs.existsSync(filePath)) return fallback;
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return fallback;
-  }
-}
-
-function writeJson(filePath, data) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf8");
-  fs.renameSync(tmpPath, filePath);
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
-      if (!chunks.length) return resolve(null);
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-      } catch (err) {
-        reject(err);
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-function send(res, status, body) {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(body));
 }
 
 function loadProposalsStore(dataDir, userId) {
@@ -122,12 +88,21 @@ async function hubspotPushAfterSave(proposal, userEmail) {
   return proposal;
 }
 
-export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR } = {}) {
+export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR, authDataDir = DEFAULT_AUTH_DATA_DIR } = {}) {
   return async function proposalsApiHandler(req, res, next) {
     const url = new URL(req.url, "http://localhost");
     if (!url.pathname.startsWith("/api/")) return next();
 
     try {
+      const session = await authenticateRequest(req, { dataDir: authDataDir });
+      if (!session) return send(res, 401, { error: "Authentication required" });
+
+      function assertOwnerOrAdmin(userId) {
+        if (userId === proposalStorageKey(session.user) || session.user.isAdmin) return true;
+        send(res, 403, { error: "Forbidden" });
+        return false;
+      }
+
       if (url.pathname === "/api/hubspot/status" && req.method === "GET") {
         return send(res, 200, { configured: isHubSpotConfigured() });
       }
@@ -140,6 +115,7 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR } = {}) {
 
       if (dedupeMatch && req.method === "POST") {
         const userId = decodeURIComponent(dedupeMatch[1]);
+        if (!assertOwnerOrAdmin(userId)) return;
         ensureUserDir(dataDir, userId);
         const before = readJson(proposalsPath(dataDir, userId), { proposals: [] });
         const raw = Array.isArray(before.proposals) ? before.proposals : [];
@@ -150,6 +126,7 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR } = {}) {
 
       if (hubspotSyncMatch && req.method === "POST") {
         const userId = decodeURIComponent(hubspotSyncMatch[1]);
+        if (!assertOwnerOrAdmin(userId)) return;
         const body = await readBody(req);
         const userEmail = String(body?.userEmail || "").trim();
         ensureUserDir(dataDir, userId);
@@ -162,6 +139,7 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR } = {}) {
 
       if (listMatch) {
         const userId = decodeURIComponent(listMatch[1]);
+        if (!assertOwnerOrAdmin(userId)) return;
         ensureUserDir(dataDir, userId);
 
         if (req.method === "POST") {
@@ -195,6 +173,7 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR } = {}) {
 
       if (draftMatch) {
         const userId = decodeURIComponent(draftMatch[1]);
+        if (!assertOwnerOrAdmin(userId)) return;
         ensureUserDir(dataDir, userId);
         if (req.method === "GET") {
           const draft = readJson(draftPath(dataDir, userId), null);
@@ -218,6 +197,7 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR } = {}) {
       if (oneMatch) {
         const userId = decodeURIComponent(oneMatch[1]);
         const proposalId = decodeURIComponent(oneMatch[2]);
+        if (!assertOwnerOrAdmin(userId)) return;
         ensureUserDir(dataDir, userId);
         const proposals = loadProposalsStore(dataDir, userId);
 

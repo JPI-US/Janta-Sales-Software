@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { createProposalsApiMiddleware } from "./server/proposalsApi.js";
+import { createApiMiddleware } from "./server/apiHandler.js";
 
 export default defineConfig({
   plugins: [
@@ -8,7 +8,7 @@ export default defineConfig({
     {
       name: "proposals-cloud-api",
       configureServer(server) {
-        server.middlewares.use(createProposalsApiMiddleware());
+        server.middlewares.use(createApiMiddleware());
       },
     },
   ],

@@ -8,11 +8,17 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM docker.io/library/nginx:1.27-alpine
+FROM docker.io/library/node:20-alpine
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=builder /app/dist /usr/share/nginx/html
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=8080
+
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/server ./server
+COPY --from=builder /app/shared ./shared
+COPY --from=builder /app/src/solarPricing.js ./src/solarPricing.js
 
 EXPOSE 8080
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["node", "server/serve.mjs"]

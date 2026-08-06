@@ -1,6 +1,7 @@
 node_modules/
 dist/
 data/cloud-proposals/
+data/auth/
 .env
 .env.local
 *.log

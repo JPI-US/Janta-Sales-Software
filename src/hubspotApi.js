@@ -6,6 +6,7 @@ function apiUrl(path) {
 
 async function request(path, options = {}) {
   const res = await fetch(apiUrl(path), {
+    credentials: "include",
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
