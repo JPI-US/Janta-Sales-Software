@@ -1,17 +1,20 @@
 import L from "leaflet";
 
-/** Static north-arrow HTML used by editor, preview, and PDF bake. */
+/** Static north-arrow HTML used by editor, preview, and PDF bake.
+ * Always screen-fixed north-up — never inherits map/tower CSS transforms.
+ */
 export function compassMarkup() {
   return `
-    <div class="janta-compass" aria-label="North" title="North" style="
+    <div class="janta-compass" aria-label="North" title="North (map always faces north)" style="
       width:52px;height:52px;border-radius:50%;
       background:rgba(255,255,255,0.92);
       border:2px solid #2F3B4C;
       box-shadow:0 2px 8px rgba(0,0,0,0.35);
       display:flex;align-items:center;justify-content:center;
       position:relative;font-family:system-ui,sans-serif;user-select:none;
+      transform:none !important;
     ">
-      <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true">
+      <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true" style="transform:none !important;">
         <polygon points="18,4 22,18 18,15 14,18" fill="#C93C37"/>
         <polygon points="18,32 22,18 18,21 14,18" fill="#2F3B4C"/>
         <circle cx="18" cy="18" r="2.2" fill="#2F3B4C"/>
@@ -29,6 +32,7 @@ export function addCompassControl(map, position = "topright") {
     options: { position },
     onAdd() {
       const div = L.DomUtil.create("div", "janta-compass-control");
+      div.style.transform = "none";
       div.innerHTML = compassMarkup();
       L.DomEvent.disableClickPropagation(div);
       L.DomEvent.disableScrollPropagation(div);

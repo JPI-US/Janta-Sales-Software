@@ -9,20 +9,18 @@ import {
 } from "./siteMapModel.js";
 import { appendCompassOverlay } from "./siteMapCompass.js";
 import {
-  SITE_LOCK_MIN_ZOOM,
-  SITE_LOCK_PAD_METERS,
-  SITE_LOCK_ZOOM,
   SITE_MAP_MAX_ZOOM,
   SITE_MAP_NATIVE_ZOOM,
-  siteLockBounds,
   sitePinHtml,
   towerIconHtml,
 } from "./siteMapMarkers.js";
-import { towersLatLngBounds } from "./siteMapLayout.js";
+import { applySiteMapCamera, SITE_MAP_VIEW_PADDING } from "./siteMapCamera.js";
+import { addTowerRotationCircles, ensureRadiiPane } from "./siteMapRadii.js";
 
-function towerDivIcon(tower, zoom) {
+/** Same icon pipeline as SiteMapPreview so PDF matches the proposal section. */
+function towerDivIcon(tower, zoom, towerCount = 0) {
   const { html, wPx, hPx, iconAnchor } = towerIconHtml(tower, zoom, false, {
-    forceFull: true,
+    towerCount,
   });
   return L.divIcon({
     className: "janta-tower-icon",
@@ -63,8 +61,13 @@ function waitForTileLayer(layer, timeoutMs = 10000) {
   });
 }
 
+/** Bake host size — keep in sync with proposal site-map block aspect. */
+export const SITE_MAP_BAKE_WIDTH = 720;
+export const SITE_MAP_BAKE_HEIGHT = 350;
+
 /**
  * Off-screen Leaflet bake → PNG data URL for PDF.
+ * Uses the same camera + tower icons as SiteMapPreview.
  * Returns null when there is no geocoded site map layout.
  */
 export async function bakeSiteMapToDataUrl(siteMapInput) {
@@ -78,8 +81,8 @@ export async function bakeSiteMapToDataUrl(siteMapInput) {
     position: "fixed",
     left: "-12000px",
     top: "0",
-    width: "720px",
-    height: "350px",
+    width: `${SITE_MAP_BAKE_WIDTH}px`,
+    height: `${SITE_MAP_BAKE_HEIGHT}px`,
     zIndex: "-1",
     background: "#1a1a1a",
   });
@@ -97,6 +100,8 @@ export async function bakeSiteMapToDataUrl(siteMapInput) {
       boxZoom: false,
       keyboard: false,
       maxZoom: SITE_MAP_MAX_ZOOM,
+      zoomSnap: 0,
+      markerZoomAnimation: false,
     });
 
     const tiles = L.tileLayer(ESRI_WORLD_IMAGERY_URL, {
@@ -106,42 +111,17 @@ export async function bakeSiteMapToDataUrl(siteMapInput) {
       crossOrigin: true,
     }).addTo(map);
 
-    const towerBounds = towersLatLngBounds(siteMap.towers, 45);
-    const bounds = L.latLngBounds(
-      towerBounds || siteLockBounds(siteMap.lat, siteMap.lng, SITE_LOCK_PAD_METERS)
-    );
-    const savedZoom = Number(siteMap.zoom);
-    if (Number.isFinite(savedZoom) && savedZoom >= 14) {
-      if (towerBounds) {
-        map.setMinZoom(14);
-        map.setView(
-          [
-            (bounds.getSouth() + bounds.getNorth()) / 2,
-            (bounds.getWest() + bounds.getEast()) / 2,
-          ],
-          Math.min(SITE_MAP_MAX_ZOOM, savedZoom),
-          { animate: false }
-        );
-      } else {
-        map.setMinZoom(SITE_LOCK_MIN_ZOOM);
-        map.setView(
-          [siteMap.lat, siteMap.lng],
-          Math.min(SITE_MAP_MAX_ZOOM, savedZoom),
-          { animate: false }
-        );
-      }
-    } else if (towerBounds) {
-      map.setMinZoom(14);
-      map.fitBounds(bounds, { animate: false, padding: [28, 28], maxZoom: SITE_LOCK_ZOOM });
-    } else if (siteMap.mapLocked !== false) {
-      map.setMaxBounds(bounds.pad(0.02));
-      map.setMinZoom(SITE_LOCK_MIN_ZOOM);
-      map.setView([siteMap.lat, siteMap.lng], SITE_LOCK_ZOOM, { animate: false });
-    } else {
-      map.setView([siteMap.lat, siteMap.lng], Math.min(SITE_MAP_MAX_ZOOM, siteMap.zoom || SITE_LOCK_ZOOM));
-    }
+    map.invalidateSize(true);
+    applySiteMapCamera(map, siteMap, { padding: SITE_MAP_VIEW_PADDING });
     map.invalidateSize(true);
     const zoom = map.getZoom();
+    const towerCount = siteMap.towers.length;
+
+    ensureRadiiPane(map);
+    if (!map.getPane("jantaTowers")) {
+      map.createPane("jantaTowers");
+      map.getPane("jantaTowers").style.zIndex = 650;
+    }
 
     L.marker([siteMap.lat, siteMap.lng], {
       icon: sitePinIcon(),
@@ -150,10 +130,13 @@ export async function bakeSiteMapToDataUrl(siteMapInput) {
       zIndexOffset: 800,
     }).addTo(map);
 
+    addTowerRotationCircles(map, siteMap.towers);
+
     siteMap.towers.forEach((tower) => {
       if (tower.lat == null || tower.lng == null) return;
       L.marker([tower.lat, tower.lng], {
-        icon: towerDivIcon(tower, zoom),
+        icon: towerDivIcon(tower, zoom, towerCount),
+        pane: "jantaTowers",
         interactive: false,
         keyboard: false,
         zIndexOffset: 600,
@@ -164,6 +147,8 @@ export async function bakeSiteMapToDataUrl(siteMapInput) {
 
     await waitForTileLayer(tiles);
     map.invalidateSize(true);
+    // Re-apply after tiles/size settle so framing matches the live preview.
+    applySiteMapCamera(map, siteMap, { padding: SITE_MAP_VIEW_PADDING });
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
 
     const canvas = await html2canvas(host, {
@@ -172,8 +157,8 @@ export async function bakeSiteMapToDataUrl(siteMapInput) {
       logging: false,
       backgroundColor: "#1a1a1a",
       scale: 2,
-      width: 720,
-      height: 350,
+      width: SITE_MAP_BAKE_WIDTH,
+      height: SITE_MAP_BAKE_HEIGHT,
     });
     return canvas.toDataURL("image/png");
   } finally {

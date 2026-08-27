@@ -13,18 +13,18 @@ export const AUTO_LAYOUT_MAX_TOWERS = 400;
 export const AUTO_LAYOUT_MIN_TOWERS = 4;
 
 /**
- * Center-to-center spacing (ft) — every neighbor is 25 ft apart
+ * Center-to-center spacing (ft) — every neighbor is 20 ft apart
  * left/right (columns) and up/down (rows) for auto-layout / even-space.
  */
-export const DEFAULT_COL_PITCH_FT = 25;
-export const DEFAULT_ROW_PITCH_FT = 25;
-export const TOWER_SPACING_FT = 25;
+export const DEFAULT_COL_PITCH_FT = 20;
+export const DEFAULT_ROW_PITCH_FT = 20;
+export const TOWER_SPACING_FT = 20;
 
 /** Finer snap while dragging — keeps layout pitch, but allows precise nudges. */
 export const SNAP_GRID_FT = 5;
 
 /** Hard minimum center-to-center clearance (ft) in any direction. */
-export const MIN_TOWER_SEPARATION_FT = 25;
+export const MIN_TOWER_SEPARATION_FT = 20;
 
 export function towersNeededForKw(kw) {
   const n = Math.ceil((Number(kw) || 0) / KW_PER_TOWER);

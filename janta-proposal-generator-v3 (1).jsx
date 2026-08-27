@@ -2,10 +2,11 @@ import { useState, useEffect, useMemo, useRef, useId } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { applyProposalSnapshot, buildProposalSnapshot } from "./src/jantaProposalPersistence.js";
 import SiteMapEditor from "./src/SiteMapEditor.jsx";
-import SiteMapPreview from "./src/SiteMapPreview.jsx";
+import SiteMapProposalFrame from "./src/SiteMapProposalFrame.jsx";
 import { bakeSiteMapToDataUrl } from "./src/siteMapBake.js";
-import { createEmptySiteMap, normalizeSiteMap, siteMapHasLayout } from "./src/siteMapModel.js";
+import { createEmptySiteMap, normalizeSiteMap, siteMapHasLayout, siteMapMeetsTowerRequirement } from "./src/siteMapModel.js";
 import { geocodeSiteAddress, suggestSiteAddresses } from "./src/siteMapGeocode.js";
+import { towersNeededForKw } from "./src/siteMapLayout.js";
 import {
   activeEquipmentItems,
   collapseEquipmentForStorage,
@@ -2539,7 +2540,7 @@ export default function JantaProposal({
       await new Promise((resolve) => requestAnimationFrame(resolve));
       await new Promise((resolve) => requestAnimationFrame(resolve));
 
-      // Bake interactive Leaflet map → static PNG before PDF capture (never ship live map DOM).
+      // Bake Leaflet map → static PNG (same camera/icons as proposal SiteMapPreview).
       if (siteMapHasLayout(siteMap)) {
         try {
           const baked = await bakeSiteMapToDataUrl(siteMap);
@@ -3963,7 +3964,18 @@ export default function JantaProposal({
         {/* Step nav */}
         <div style={{ display: "flex", gap: 4 }}>
           {steps.map((s, i) => (
-            <button key={i} onClick={() => setStep(i)} style={{
+            <button key={i} onClick={() => {
+              if (i > 1 && !siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject)) {
+                const needed = towersNeededForKw(effectiveSizeProject);
+                const have = normalizeSiteMap(siteMap).towers.length;
+                window.alert(
+                  `Place ${needed} tower${needed === 1 ? "" : "s"} on the site map for this ${Math.round(effectiveSizeProject * 10) / 10} kW project before continuing (currently ${have}).`
+                );
+                setStep(1);
+                return;
+              }
+              setStep(i);
+            }} style={{
               flex: 1, padding: "10px 12px", border: "none", cursor: "pointer",
               background: isDarkMode
                 ? (step === i ? C.gold : "#E3D2B8")
@@ -4870,21 +4882,16 @@ export default function JantaProposal({
 
             {siteMapHasLayout(siteMap) && renderProposalPreviewShell(
               "Site Map",
-              <div style={{ background: C.white, borderRadius: 10, padding: 18, border: `1px solid ${C.g200}` }}>
-                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
-                  <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: titleColor, flexShrink: 0 }}>Site Map</h3>
-                  {(siteMap.address || custAddress) ? (
-                    <p style={{ margin: 0, color: C.g500, fontSize: 11, fontFamily: fontSans, lineHeight: 1.45, textAlign: "right", flex: 1, minWidth: 0 }}>
-                      {siteMap.address || custAddress}
-                    </p>
-                  ) : null}
-                </div>
-                <SiteMapPreview
-                  siteMap={siteMap}
-                  height={280}
-                  interactive={false}
-                />
-              </div>
+              <SiteMapProposalFrame
+                siteMap={siteMap}
+                address={siteMap.address || custAddress || ""}
+                titleColor={titleColor}
+                borderColor={C.g200}
+                mutedColor={C.g500}
+                padding={12}
+                titleFontSize={18}
+                captionFontSize={11}
+              />
             )}
 
             {multiMeterMode ? (
@@ -4930,7 +4937,38 @@ export default function JantaProposal({
 
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => setStep(0)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back to Bill</button>
-              <button onClick={() => setStep(2)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Continue to Project Pricing →</button>
+              <button
+                onClick={() => {
+                  if (!siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject)) {
+                    const needed = towersNeededForKw(effectiveSizeProject);
+                    const have = normalizeSiteMap(siteMap).towers.length;
+                    window.alert(
+                      `Place ${needed} tower${needed === 1 ? "" : "s"} on the site map for this ${Math.round(effectiveSizeProject * 10) / 10} kW project before continuing (currently ${have}).`
+                    );
+                    return;
+                  }
+                  setStep(2);
+                }}
+                style={{
+                  flex: 2,
+                  padding: "12px 0",
+                  background:
+                    siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject)
+                      ? (darkThemeActive ? "#E3D2B8" : C.navy)
+                      : C.g300,
+                  color: siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject)
+                    ? (darkThemeActive ? "#1B140D" : "#F8F2E8")
+                    : C.g500,
+                  border: darkThemeActive && siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject) ? `1px solid ${C.g300}` : "none",
+                  borderRadius: 8,
+                  cursor: siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject) ? "pointer" : "default",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  fontFamily: fontSans,
+                }}
+              >
+                Continue to Project Pricing →
+              </button>
             </div>
           </div>
         )}
@@ -5445,7 +5483,23 @@ export default function JantaProposal({
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => setStep(3)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back</button>
-              <button onClick={() => setStep(5)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Generate Proposal →</button>
+              <button
+                onClick={() => {
+                  if (!siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject)) {
+                    const needed = towersNeededForKw(effectiveSizeProject);
+                    const have = normalizeSiteMap(siteMap).towers.length;
+                    window.alert(
+                      `Place ${needed} tower${needed === 1 ? "" : "s"} on the site map for this ${Math.round(effectiveSizeProject * 10) / 10} kW project before generating the proposal (currently ${have}).`
+                    );
+                    setStep(1);
+                    return;
+                  }
+                  setStep(5);
+                }}
+                style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}
+              >
+                Generate Proposal →
+              </button>
             </div>
           </div>
         )}
@@ -5611,9 +5665,7 @@ export default function JantaProposal({
                 ? (productionOnlyMode ? "Project Production (All Meters Combined)" : "Project Totals (All Meters Combined)")
                 : proposalFinancialSectionTitle;
 
-              // Bake is 720×350 — render at natural aspect (no stretch / crop window).
-              const siteMapBakeW = 720;
-              const siteMapBakeH = 350;
+              // Site map block uses SiteMapProposalFrame (720×350 bake aspect).
               const introSiteBlock = (
                 <div
                   style={{
@@ -5649,63 +5701,18 @@ export default function JantaProposal({
               );
 
               const siteMapBlock = siteMapHasLayout(siteMap) ? (
-                <div
-                  style={{
-                    background: C.white,
-                    borderRadius: 10,
-                    padding: 12,
-                    border: `1px solid ${C.g200}`,
-                    breakInside: "avoid",
-                    pageBreakInside: "avoid",
-                  }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "baseline",
-                      justifyContent: "space-between",
-                      gap: 12,
-                      marginBottom: 6,
-                    }}
-                  >
-                    <h3 style={{ margin: 0, fontSize: PT.section, fontWeight: 700, color: titleColor, fontFamily: fontSans, flexShrink: 0 }}>
-                      Site Map
-                    </h3>
-                    {(siteMap.address || custAddress) ? (
-                      <p style={{ margin: 0, color: C.g500, fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.45, textAlign: "right", flex: 1, minWidth: 0 }}>
-                        {siteMap.address || custAddress}
-                      </p>
-                    ) : null}
-                  </div>
-                  {siteMap.bakedImageDataUrl ? (
-                    <img
-                      src={siteMap.bakedImageDataUrl}
-                      alt="Site map with proposed solar towers"
-                      width={siteMapBakeW}
-                      height={siteMapBakeH}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        height: "auto",
-                        borderRadius: 8,
-                        border: `1px solid ${C.g200}`,
-                      }}
-                    />
-                  ) : pdfExporting ? null : (
-                    <SiteMapPreview
-                      siteMap={siteMap}
-                      height={siteMapBakeH}
-                      interactive
-                      onZoomChange={(zoom) => {
-                        setSiteMap((prev) => {
-                          const sm = normalizeSiteMap(prev);
-                          if (sm.zoom === zoom) return prev;
-                          return { ...sm, zoom, bakedImageDataUrl: null };
-                        });
-                      }}
-                    />
-                  )}
-                </div>
+                <SiteMapProposalFrame
+                  siteMap={siteMap}
+                  address={siteMap.address || custAddress || ""}
+                  titleColor={titleColor}
+                  borderColor={C.g200}
+                  mutedColor={C.g500}
+                  padding={12}
+                  titleFontSize={PT.section}
+                  captionFontSize={PT.caption}
+                  bakedImageDataUrl={siteMap.bakedImageDataUrl}
+                  pdfExporting={pdfExporting}
+                />
               ) : null;
 
               const financialBreakdownBlock = (

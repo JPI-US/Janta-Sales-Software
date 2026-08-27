@@ -1,14 +1,25 @@
 import { feetToPixels } from "./siteMapModel.js";
 
-/** Fixed Janta tower footprint (ft). Never resized in the editor. */
+/** Fixed Janta tower footprint (ft). Layout / spacing still use these values. */
 export const TOWER_WIDTH_FT = 8;
 export const TOWER_LENGTH_FT = 14;
+
+/** Draw icons a bit larger than true footprint so they read clearly on imagery. */
+export const TOWER_ICON_SCALE = 1.38;
 
 /**
  * Degrees clockwise from map north.
  * Compass N is always up on the map. Facing south ⇒ arrow points down ⇒ 180°.
  */
 export const DEFAULT_TOWER_ROTATION_DEG = 180;
+
+/**
+ * Radius (ft) of the rotation sweep circle around a tower center —
+ * half the footprint diagonal, scaled to match the on-screen icon.
+ */
+export const TOWER_ROTATION_RADIUS_FT =
+  (Math.sqrt(TOWER_WIDTH_FT * TOWER_WIDTH_FT + TOWER_LENGTH_FT * TOWER_LENGTH_FT) / 2) *
+  TOWER_ICON_SCALE;
 
 /** Explore padding around the geocoded pin when the map is locked (meters). */
 export const SITE_LOCK_PAD_METERS = 60;
@@ -51,7 +62,7 @@ export function siteLockBounds(lat, lng, padMeters = SITE_LOCK_PAD_METERS) {
 
 export function sitePinHtml() {
   return `
-    <div style="position:relative;width:28px;height:36px;transform:translate(-14px,-36px);filter:drop-shadow(0 2px 3px rgba(0,0,0,0.45));">
+    <div style="position:relative;width:28px;height:36px;transform:translate(-14px,-36px);filter:drop-shadow(0 2px 3px rgba(0,0,0,0.45));cursor:grab;">
       <svg width="28" height="36" viewBox="0 0 28 36" aria-hidden="true">
         <path d="M14 0C6.3 0 0 6.3 0 14c0 10.5 14 22 14 22s14-11.5 14-22C28 6.3 21.7 0 14 0z" fill="#C93C37"/>
         <circle cx="14" cy="13" r="5.5" fill="#fff"/>
@@ -63,8 +74,8 @@ export function sitePinHtml() {
 /** Layout metrics shared by HTML build + in-place DOM updates. */
 export function towerIconMetrics(tower, zoom) {
   const lat = Number(tower.lat) || 0;
-  const wPx = Math.round(feetToPixels(TOWER_WIDTH_FT, lat, zoom) * 10) / 10;
-  const hPx = Math.round(feetToPixels(TOWER_LENGTH_FT, lat, zoom) * 10) / 10;
+  const wPx = Math.round(feetToPixels(TOWER_WIDTH_FT, lat, zoom) * TOWER_ICON_SCALE * 10) / 10;
+  const hPx = Math.round(feetToPixels(TOWER_LENGTH_FT, lat, zoom) * TOWER_ICON_SCALE * 10) / 10;
   const rot = Number.isFinite(Number(tower.rotationDeg))
     ? Math.round(Number(tower.rotationDeg) * 10) / 10
     : DEFAULT_TOWER_ROTATION_DEG;
@@ -86,7 +97,7 @@ function panelInnerHtml(detail, selected) {
   if (detail === "dot") {
     return `
       <svg viewBox="0 0 80 120" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block">
-        <rect x="8" y="10" width="64" height="100" rx="3" fill="#1E3F8A" stroke="${rim}" stroke-width="${rimW}"/>
+        <rect x="8" y="10" width="64" height="100" rx="3" style="fill:#1E3F8A;stroke:${rim};stroke-width:${rimW}"/>
       </svg>
     `;
   }
@@ -94,8 +105,8 @@ function panelInnerHtml(detail, selected) {
   if (detail === "simple") {
     return `
       <svg viewBox="0 0 80 120" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block">
-        <rect x="6" y="9" width="32" height="94" rx="2" fill="#1E3F8A" stroke="${rim}" stroke-width="${rimW}"/>
-        <rect x="42" y="9" width="32" height="94" rx="2" fill="#244A9A" stroke="${rim}" stroke-width="${rimW}"/>
+        <rect x="6" y="9" width="32" height="94" rx="2" style="fill:#1E3F8A;stroke:${rim};stroke-width:${rimW}"/>
+        <rect x="42" y="9" width="32" height="94" rx="2" style="fill:#244A9A;stroke:${rim};stroke-width:${rimW}"/>
       </svg>
     `;
   }
@@ -104,12 +115,12 @@ function panelInnerHtml(detail, selected) {
   return `
     <svg viewBox="0 0 80 120" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:block">
       ${selected ? `<rect x="3" y="5" width="74" height="102" rx="3.5" fill="none" stroke="#F3B664" stroke-width="2.4"/>` : ""}
-      <rect x="6" y="9" width="32" height="94" rx="2" fill="#1E3F8A" stroke="${rim}" stroke-width="${rimW}"/>
+      <rect x="6" y="9" width="32" height="94" rx="2" style="fill:#1E3F8A;stroke:${rim};stroke-width:${rimW}"/>
       <g stroke="rgba(255,255,255,0.28)" stroke-width="0.55">
         <path d="M6 28 H38 M6 47 H38 M6 66 H38 M6 85 H38"/>
         <path d="M16.5 9 V103 M27 9 V103"/>
       </g>
-      <rect x="42" y="9" width="32" height="94" rx="2" fill="#244A9A" stroke="${rim}" stroke-width="${rimW}"/>
+      <rect x="42" y="9" width="32" height="94" rx="2" style="fill:#244A9A;stroke:${rim};stroke-width:${rimW}"/>
       <g stroke="rgba(255,255,255,0.28)" stroke-width="0.55">
         <path d="M42 28 H74 M42 47 H74 M42 66 H74 M42 85 H74"/>
         <path d="M53 9 V103 M63.5 9 V103"/>
@@ -154,12 +165,12 @@ export function towerIconHtml(tower, zoom, selected, opts = {}) {
 
   return {
     html: `
-      <div class="janta-tower-hit${sel ? " is-selected" : ""}" data-detail="${detail}" style="width:${m.wPx}px;height:${totalH}px;position:relative;overflow:visible;cursor:grab;">
+      <div class="janta-tower-hit${sel ? " is-selected" : ""}" data-detail="${detail}" style="width:${m.wPx}px;height:${totalH}px;position:relative;overflow:visible;cursor:grab;${sel ? "filter:drop-shadow(0 0 5px rgba(243,182,100,0.85));" : "filter:none;"}">
         <div class="janta-tower-spin" style="
           position:absolute;left:0;top:0;width:${m.wPx}px;height:${totalH}px;
           transform:rotate(${m.rot}deg);
           transform-origin:${(m.wPx / 2).toFixed(1)}px ${originY.toFixed(1)}px;
-          ${sel ? "filter:drop-shadow(0 0 5px rgba(243,182,100,0.85));" : "filter:none;"}
+          filter:none;
         ">
           <div class="janta-tower-arrow" style="
             position:absolute;
@@ -226,7 +237,9 @@ export function updateTowerIconElement(rootEl, tower, zoom, selected, opts = {})
   spin.style.height = `${totalH}px`;
   spin.style.transform = `rotate(${m.rot}deg)`;
   spin.style.transformOrigin = `${(m.wPx / 2).toFixed(1)}px ${originY.toFixed(1)}px`;
-  spin.style.filter = sel ? "drop-shadow(0 0 5px rgba(243,182,100,0.85))" : "none";
+  // Avoid filter on the rotating layer — some GPUs drop the whole paint with filter+transform.
+  spin.style.filter = "none";
+  hit.style.filter = sel ? "drop-shadow(0 0 5px rgba(243,182,100,0.85))" : "none";
 
   if (arrow) {
     arrow.style.display = showArrow ? "block" : "none";

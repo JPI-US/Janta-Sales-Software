@@ -8,17 +8,14 @@ import {
 } from "./siteMapModel.js";
 import { addCompassControl } from "./siteMapCompass.js";
 import {
-  SITE_LOCK_MIN_ZOOM,
-  SITE_LOCK_PAD_METERS,
-  SITE_LOCK_ZOOM,
   SITE_MAP_MAX_ZOOM,
   SITE_MAP_NATIVE_ZOOM,
-  siteLockBounds,
   sitePinHtml,
   towerIconHtml,
   updateTowerIconElement,
 } from "./siteMapMarkers.js";
-import { towersLatLngBounds } from "./siteMapLayout.js";
+import { applySiteMapCamera } from "./siteMapCamera.js";
+import { addTowerRotationCircles, ensureRadiiPane } from "./siteMapRadii.js";
 
 function towerDivIcon(tower, zoom, towerCount = 0) {
   const { html, wPx, hPx, iconAnchor } = towerIconHtml(tower, zoom, false, {
@@ -61,69 +58,24 @@ function sitePinIcon() {
   });
 }
 
-function applyInitialView(map, current) {
-  const towerBounds = towersLatLngBounds(current.towers, 45);
-  const bounds = L.latLngBounds(
-    towerBounds || siteLockBounds(current.lat, current.lng, SITE_LOCK_PAD_METERS)
-  );
-  const savedZoom = Number(current.zoom);
-
-  // Shared zoom from System / proposal section.
-  if (Number.isFinite(savedZoom) && savedZoom >= 14) {
-    if (towerBounds) {
-      map.setMinZoom(14);
-      map.setView(
-        [
-          (bounds.getSouth() + bounds.getNorth()) / 2,
-          (bounds.getWest() + bounds.getEast()) / 2,
-        ],
-        Math.min(SITE_MAP_MAX_ZOOM, savedZoom),
-        { animate: false }
-      );
-    } else {
-      map.setMinZoom(SITE_LOCK_MIN_ZOOM);
-      map.setView(
-        [current.lat, current.lng],
-        Math.min(SITE_MAP_MAX_ZOOM, savedZoom),
-        { animate: false }
-      );
-    }
-    return;
-  }
-
-  if (towerBounds) {
-    map.setMinZoom(14);
-    map.fitBounds(bounds, { animate: false, padding: [24, 24], maxZoom: SITE_LOCK_ZOOM });
-  } else if (current.mapLocked !== false) {
-    map.setMaxBounds(bounds.pad(0.02));
-    map.setMinZoom(SITE_LOCK_MIN_ZOOM);
-    map.setView([current.lat, current.lng], SITE_LOCK_ZOOM, { animate: false });
-  } else {
-    map.setView(
-      [current.lat, current.lng],
-      Math.min(SITE_MAP_MAX_ZOOM, current.zoom || SITE_LOCK_ZOOM)
-    );
-  }
-}
-
 /**
- * Proposal site map preview.
- * - interactive=false: mirrors shared zoom (no +/-)
- * - interactive=true: +/- updates shared siteMap.zoom for all maps
+ * Read-only site map preview for proposal / PDF framing.
+ * Camera follows siteMap.viewLat/viewLng + zoom from Region & System (SiteMapEditor).
+ * Interaction is intentionally disabled — adjust the map only in the editor.
+ *
+ * @param {number|string} [height=280]
+ * @param {number} [fixedWidth] — when set, map uses this CSS width (for bake-matched framing)
  */
 export default function SiteMapPreview({
   siteMap,
   height = 280,
-  interactive = false,
-  onZoomChange,
+  fixedWidth,
 }) {
   const elRef = useRef(null);
   const mapRef = useRef(null);
   const markersRef = useRef([]);
+  const circlesRef = useRef([]);
   const towersRef = useRef([]);
-  const applyingSharedZoomRef = useRef(false);
-  const onZoomChangeRef = useRef(onZoomChange);
-  onZoomChangeRef.current = onZoomChange;
 
   const sm = normalizeSiteMap(siteMap);
   const layoutKey = useMemo(() => {
@@ -131,12 +83,13 @@ export default function SiteMapPreview({
     return JSON.stringify({
       lat: sm.lat,
       lng: sm.lng,
-      locked: sm.mapLocked !== false,
-      interactive: Boolean(interactive),
+      locked: sm.mapLocked === true,
       towers: sm.towers.map((t) => [t.id, t.lat, t.lng, t.rotationDeg]),
+      fixedWidth: fixedWidth || null,
+      height: height === "100%" ? "100%" : Number(height) || 280,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [siteMap?.lat, siteMap?.lng, siteMap?.mapLocked, siteMap?.towers, interactive]);
+  }, [siteMap?.lat, siteMap?.lng, siteMap?.mapLocked, siteMap?.towers, fixedWidth, height]);
 
   useEffect(() => {
     if (!layoutKey || !elRef.current) return undefined;
@@ -147,15 +100,14 @@ export default function SiteMapPreview({
       preferCanvas: true,
       zoomControl: false,
       attributionControl: false,
-      dragging: interactive,
-      scrollWheelZoom: interactive,
+      dragging: false,
+      scrollWheelZoom: false,
       doubleClickZoom: false,
       boxZoom: false,
-      keyboard: interactive,
+      keyboard: false,
       maxZoom: SITE_MAP_MAX_ZOOM,
-      zoomSnap: interactive ? 0 : 1,
+      zoomSnap: 0,
       zoomDelta: 0.5,
-      wheelPxPerZoomLevel: 120,
       markerZoomAnimation: false,
     });
     L.tileLayer(ESRI_WORLD_IMAGERY_URL, {
@@ -165,8 +117,13 @@ export default function SiteMapPreview({
       crossOrigin: true,
     }).addTo(map);
     addCompassControl(map, "topright");
+    ensureRadiiPane(map);
+    if (!map.getPane("jantaTowers")) {
+      map.createPane("jantaTowers");
+      map.getPane("jantaTowers").style.zIndex = 650;
+    }
 
-    applyInitialView(map, current);
+    applySiteMapCamera(map, current);
 
     L.marker([current.lat, current.lng], {
       icon: sitePinIcon(),
@@ -175,12 +132,13 @@ export default function SiteMapPreview({
       zIndexOffset: 800,
     }).addTo(map);
 
+    circlesRef.current = addTowerRotationCircles(map, current.towers);
+
     const refreshTowerIcons = () => {
       const z = map.getZoom();
       const towers = towersRef.current;
       const count = towers.length;
 
-      // First paint or tower-set change: rebuild markers.
       if (markersRef.current.length !== towers.filter((t) => t.lat != null && t.lng != null).length) {
         markersRef.current.forEach((m) => m.remove());
         markersRef.current = [];
@@ -188,6 +146,7 @@ export default function SiteMapPreview({
           if (tower.lat == null || tower.lng == null) return;
           const marker = L.marker([tower.lat, tower.lng], {
             icon: towerDivIcon(tower, z, count),
+            pane: "jantaTowers",
             interactive: false,
             keyboard: false,
             zIndexOffset: 600,
@@ -209,47 +168,52 @@ export default function SiteMapPreview({
 
     refreshTowerIcons();
 
-    let onZoomEnd = null;
-    if (interactive) {
-      onZoomEnd = () => {
-        refreshTowerIcons();
-        if (applyingSharedZoomRef.current) return;
-        const z = map.getZoom();
-        if (typeof onZoomChangeRef.current === "function") {
-          onZoomChangeRef.current(z);
-        }
-      };
-      map.on("zoomend", onZoomEnd);
-    }
-
     mapRef.current = map;
     map._jantaRefreshTowers = refreshTowerIcons;
-    requestAnimationFrame(() => map.invalidateSize(true));
+    requestAnimationFrame(() => {
+      map.invalidateSize(true);
+      applySiteMapCamera(map, current);
+      refreshTowerIcons();
+    });
 
     return () => {
-      if (onZoomEnd) map.off("zoomend", onZoomEnd);
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
+      circlesRef.current.forEach((c) => c.remove());
+      circlesRef.current = [];
       map.remove();
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layoutKey]);
 
-  // Keep this map's zoom linked to shared siteMap.zoom.
+  // Keep this map's camera linked to shared siteMap view from the editor.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    const z = Number(normalizeSiteMap(siteMap).zoom);
+    const current = normalizeSiteMap(siteMap);
+    const z = Number(current.zoom);
+    const vLat = Number(current.viewLat);
+    const vLng = Number(current.viewLng);
     if (!Number.isFinite(z)) return;
-    if (Math.abs(map.getZoom() - z) < 0.05) return;
-    applyingSharedZoomRef.current = true;
-    map.setZoom(z, { animate: false });
+
+    const center = map.getCenter();
+    const zoomSame = Math.abs(map.getZoom() - z) < 0.05;
+    const centerSame =
+      Number.isFinite(vLat) &&
+      Number.isFinite(vLng) &&
+      Math.abs(center.lat - vLat) < 1e-6 &&
+      Math.abs(center.lng - vLng) < 1e-6;
+
+    if (Number.isFinite(vLat) && Number.isFinite(vLng)) {
+      if (zoomSame && centerSame) return;
+    } else if (zoomSame) {
+      return;
+    }
+
+    applySiteMapCamera(map, current);
     if (typeof map._jantaRefreshTowers === "function") map._jantaRefreshTowers();
-    requestAnimationFrame(() => {
-      applyingSharedZoomRef.current = false;
-    });
-  }, [siteMap?.zoom]);
+  }, [siteMap?.zoom, siteMap?.viewLat, siteMap?.viewLng, siteMap?.lat, siteMap?.lng, siteMap?.towers, siteMap?.mapLocked]);
 
   useEffect(() => {
     towersRef.current = normalizeSiteMap(siteMap).towers;
@@ -257,21 +221,33 @@ export default function SiteMapPreview({
 
   if (!siteMapHasLayout(siteMap)) return null;
 
+  const fillParent = height === "100%";
+  const mapWidth = Number.isFinite(Number(fixedWidth)) ? Number(fixedWidth) : "100%";
+
   return (
-    <div style={{ position: "relative" }}>
+    <div
+      style={{
+        position: "relative",
+        width: mapWidth,
+        height: fillParent ? "100%" : undefined,
+      }}
+    >
       <div
         ref={elRef}
         style={{
-          width: "100%",
-          height,
-          borderRadius: 8,
+          width: mapWidth,
+          height: fillParent ? "100%" : height,
+          borderRadius: fixedWidth ? 0 : 8,
           overflow: "hidden",
-          border: "1px solid #DDE2E8",
+          border: fixedWidth || fillParent ? "none" : "1px solid #DDE2E8",
           background: "#1a1a1a",
+          pointerEvents: "none",
         }}
       />
       <style>{`
         .janta-tower-icon, .janta-site-pin { background: transparent !important; border: none !important; }
+        .janta-compass-control .janta-compass,
+        .janta-compass-control .janta-compass svg { transform: none !important; }
         .leaflet-control-attribution { display: none !important; }
       `}</style>
     </div>

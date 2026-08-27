@@ -1,12 +1,67 @@
 /**
  * Browser-friendly site geocoding with Nominatim + Photon.
- * Supports autocomplete suggestions and single-address resolve.
+ * Supports autocomplete suggestions, lat/lng paste, and duplex-aware resolve.
  */
+
+const STATE_ABBR = {
+  alabama: "AL",
+  alaska: "AK",
+  arizona: "AZ",
+  arkansas: "AR",
+  california: "CA",
+  colorado: "CO",
+  connecticut: "CT",
+  delaware: "DE",
+  florida: "FL",
+  georgia: "GA",
+  hawaii: "HI",
+  idaho: "ID",
+  illinois: "IL",
+  indiana: "IN",
+  iowa: "IA",
+  kansas: "KS",
+  kentucky: "KY",
+  louisiana: "LA",
+  maine: "ME",
+  maryland: "MD",
+  massachusetts: "MA",
+  michigan: "MI",
+  minnesota: "MN",
+  mississippi: "MS",
+  missouri: "MO",
+  montana: "MT",
+  nebraska: "NE",
+  nevada: "NV",
+  "new hampshire": "NH",
+  "new jersey": "NJ",
+  "new mexico": "NM",
+  "new york": "NY",
+  "north carolina": "NC",
+  "north dakota": "ND",
+  ohio: "OH",
+  oklahoma: "OK",
+  oregon: "OR",
+  pennsylvania: "PA",
+  "rhode island": "RI",
+  "south carolina": "SC",
+  "south dakota": "SD",
+  tennessee: "TN",
+  texas: "TX",
+  utah: "UT",
+  vermont: "VT",
+  virginia: "VA",
+  washington: "WA",
+  "west virginia": "WV",
+  wisconsin: "WI",
+  wyoming: "WY",
+  "district of columbia": "DC",
+};
 
 function cleanAddress(raw) {
   return String(raw || "")
     .replace(/\s+/g, " ")
-    .replace(/,\s*,/g, ",")
+    .replace(/,\s*,+/g, ",")
+    .replace(/^,\s*|,\s*$/g, "")
     .trim();
 }
 
@@ -19,36 +74,159 @@ function stripUnit(address) {
   );
 }
 
+/** Drop county / country / PID / subdivision fluff from labels and queries. */
+export function simplifyAddressLabel(address) {
+  return cleanAddress(
+    String(address || "")
+      .replace(/\bUnited States(?: of America)?\b/gi, "")
+      .replace(/\bU\.?\s*S\.?\s*A\.?\b/gi, "")
+      .replace(/\b[\w.'-]+(?:\s+[\w.'-]+)?\s+County\b/gi, "")
+      .replace(/\bCounty of\s+[\w.'-]+(?:\s+[\w.'-]+)?\b/gi, "")
+      .replace(/\b(?:[\w.'-]+\s+)*PID\b/gi, "")
+      .replace(/\b(?:parcel|subdivision|complex|plaza|crossing)\s+id\b/gi, "")
+      .replace(/\bUniversity Crossing\b/gi, "")
+  );
+}
+
+function abbreviateStateNames(address) {
+  let out = String(address || "");
+  Object.entries(STATE_ABBR).forEach(([name, abbr]) => {
+    const re = new RegExp(`\\b${name}\\b`, "gi");
+    out = out.replace(re, abbr);
+  });
+  return cleanAddress(out);
+}
+
+/**
+ * Parse pasted coordinates: "32.82, -96.77" or "32.82 -96.77" or "32.82/ -96.77".
+ * Returns null when the string is not a coordinate pair.
+ */
+export function parseLatLngQuery(query) {
+  const q = cleanAddress(query);
+  if (!q) return null;
+  const m = q.match(
+    /^([+-]?\d{1,2}(?:\.\d+)?)\s*[,/\s]\s*([+-]?\d{1,3}(?:\.\d+)?)$/
+  );
+  if (!m) return null;
+  let lat = parseFloat(m[1]);
+  let lng = parseFloat(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  // If first number looks like a longitude, swap (common paste order).
+  if (Math.abs(lat) > 90 && Math.abs(lng) <= 90) {
+    const tmp = lat;
+    lat = lng;
+    lng = tmp;
+  }
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return { lat, lng };
+}
+
+function coordHit(lat, lng) {
+  const displayName = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  return {
+    id: `coord-${lat},${lng}`,
+    lat,
+    lng,
+    displayName,
+    primary: displayName,
+    secondary: "Coordinates",
+    provider: "coordinates",
+    score: 2,
+  };
+}
+
+/**
+ * Expand duplex / multi-unit house numbers into searchable street variants.
+ * e.g. "5420,5422, Winton Street, Dallas, TX" → "5422 Winton Street, Dallas, TX"
+ */
+function duplexHouseVariants(address) {
+  const raw = cleanAddress(address);
+  if (!raw) return [];
+
+  // "5420,5422, Winton Street, …" or "5420/5422 Winton …" or "5420 & 5422 Winton …"
+  const multi = raw.match(
+    /^(\d{1,6})\s*[,/&]\s*(\d{1,6})\s*,?\s+(.+)$/i
+  );
+  if (!multi) return [];
+
+  const a = multi[1];
+  const b = multi[2];
+  const rest = cleanAddress(multi[3]);
+  if (!rest) return [];
+
+  // Prefer the second number when it looks like a duplex pair (odd/even neighbors).
+  const ordered = [b, a];
+  return ordered.map((num) => cleanAddress(`${num} ${rest}`));
+}
+
+function extractPreferredHouseNumber(original) {
+  const m = String(original || "").match(/\b(\d{1,6})\b/);
+  return m ? m[1] : null;
+}
+
 export function buildGeocodeVariants(address) {
   const raw = cleanAddress(address);
   if (!raw) return [];
-  const variants = [raw];
-  const noUnit = stripUnit(raw);
-  if (noUnit && noUnit !== raw) variants.push(noUnit);
 
-  const base = noUnit || raw;
-  if (!/\b(usa|u\.s\.a\.|united states)\b/i.test(base)) {
-    variants.push(`${base}, USA`);
-    variants.push(`${base}, United States`);
+  const variants = [];
+  const push = (v) => {
+    const c = cleanAddress(v);
+    if (c && !variants.includes(c)) variants.push(c);
+  };
+
+  push(raw);
+
+  const simplified = simplifyAddressLabel(raw);
+  push(simplified);
+
+  const noUnit = stripUnit(simplified || raw);
+  push(noUnit);
+
+  duplexHouseVariants(simplified || raw).forEach(push);
+  duplexHouseVariants(noUnit).forEach(push);
+
+  const looksDuplex = /^\d{1,6}\s*[,/&]\s*\d{1,6}\b/.test(simplified || raw);
+  if (!looksDuplex) {
+    const preferred = extractPreferredHouseNumber(raw);
+    if (preferred) {
+      duplexHouseVariants(simplified || raw)
+        .filter((v) => v.startsWith(`${preferred} `))
+        .forEach((v) => {
+          const idx = variants.indexOf(v);
+          if (idx > 0) {
+            variants.splice(idx, 1);
+            variants.unshift(v);
+          }
+        });
+    }
   }
 
-  const noZip = cleanAddress(base.replace(/\b\d{5}(?:-\d{4})?\b/g, ""));
-  if (noZip && noZip !== base) variants.push(noZip);
+  const baseList = [...variants];
+  baseList.forEach((base) => {
+    const abbr = abbreviateStateNames(base);
+    push(abbr);
+    if (!/\b(usa|u\.s\.a\.|united states)\b/i.test(base)) {
+      push(`${base}, USA`);
+      push(`${abbr}, USA`);
+    }
+    const noZip = cleanAddress(base.replace(/\b\d{5}(?:-\d{4})?\b/g, ""));
+    push(noZip);
+    push(abbreviateStateNames(noZip));
+  });
 
-  return [...new Set(variants.filter(Boolean))];
+  return variants;
 }
 
 function formatPhotonLabel(p = {}, fallback = "") {
   const street = [p.housenumber, p.street].filter(Boolean).join(" ");
-  const parts = [street || p.name, p.city || p.town || p.village || p.county, p.state, p.postcode]
+  const parts = [street || p.name, p.city || p.town || p.village, p.state, p.postcode]
     .map((x) => String(x || "").trim())
     .filter(Boolean);
-  // Deduplicate consecutive repeats
   const uniq = [];
   parts.forEach((part) => {
     if (!uniq.length || uniq[uniq.length - 1].toLowerCase() !== part.toLowerCase()) uniq.push(part);
   });
-  return uniq.join(", ") || fallback;
+  return simplifyAddressLabel(uniq.join(", ") || fallback);
 }
 
 function nominatimHit(row, provider = "nominatim") {
@@ -62,7 +240,8 @@ function nominatimHit(row, provider = "nominatim") {
   const secondary = [a.city || a.town || a.village || a.hamlet, a.state, a.postcode]
     .filter(Boolean)
     .join(", ");
-  const displayName = row.display_name || [primary, secondary].filter(Boolean).join(", ");
+  const composed = [primary, secondary].filter(Boolean).join(", ");
+  const displayName = simplifyAddressLabel(composed || row.display_name || "");
   let score = Number(row.importance) || 0;
   if (row.class === "building" || row.type === "house") score += 0.4;
   if (row.class === "place" && row.type === "house") score += 0.3;
@@ -74,7 +253,7 @@ function nominatimHit(row, provider = "nominatim") {
     lng,
     displayName,
     primary: primary || displayName.split(",")[0] || displayName,
-    secondary: secondary || displayName.split(",").slice(1).join(",").trim(),
+    secondary: secondary || "",
     provider,
     score,
   };
@@ -171,36 +350,57 @@ async function fetchPhotonList(q, { limit = 6, signal, biasLat, biasLng } = {}) 
   return features.map((f) => photonHit(f)).filter(Boolean);
 }
 
+async function fetchMergedHits(q, { limit = 6, signal, biasLat, biasLng } = {}) {
+  let lastError = null;
+  const [nom, pho] = await Promise.all([
+    fetchNominatimList(q, { limit, signal }).catch((err) => {
+      if (err?.name === "AbortError") throw err;
+      lastError = err;
+      return [];
+    }),
+    fetchPhotonList(q, { limit, signal, biasLat, biasLng }).catch((err) => {
+      if (err?.name === "AbortError") throw err;
+      lastError = err;
+      return [];
+    }),
+  ]);
+  return { hits: [...nom, ...pho], lastError };
+}
+
 /**
  * Autocomplete suggestions for the property address field.
  * Merges Nominatim + Photon, dedupes, returns top matches.
+ * Also accepts lat/lng coordinate paste.
  */
 export async function suggestSiteAddresses(query, { limit = 7, signal, biasLat, biasLng } = {}) {
   const q = cleanAddress(query);
   if (q.length < 3) return [];
 
-  const variants = [q];
-  const noUnit = stripUnit(q);
-  if (noUnit && noUnit !== q) variants.push(noUnit);
+  const coords = parseLatLngQuery(q);
+  if (coords) return [coordHit(coords.lat, coords.lng)];
+
+  // Autocomplete: try cleaned query + first duplex expansion (avoid hammering APIs).
+  const variants = [];
+  const simplified = simplifyAddressLabel(q);
+  variants.push(q);
+  if (simplified && simplified !== q) variants.push(simplified);
+  duplexHouseVariants(simplified || q).slice(0, 2).forEach((v) => {
+    if (!variants.includes(v)) variants.push(v);
+  });
 
   const collected = [];
   let lastError = null;
 
-  for (const variant of variants.slice(0, 2)) {
+  for (const variant of variants.slice(0, 3)) {
     try {
-      const [nom, pho] = await Promise.all([
-        fetchNominatimList(variant, { limit, signal }).catch((err) => {
-          if (err?.name === "AbortError") throw err;
-          lastError = err;
-          return [];
-        }),
-        fetchPhotonList(variant, { limit, signal, biasLat, biasLng }).catch((err) => {
-          if (err?.name === "AbortError") throw err;
-          lastError = err;
-          return [];
-        }),
-      ]);
-      collected.push(...nom, ...pho);
+      const { hits, lastError: err } = await fetchMergedHits(variant, {
+        limit,
+        signal,
+        biasLat,
+        biasLng,
+      });
+      if (err) lastError = err;
+      collected.push(...hits);
       if (collected.length >= limit) break;
     } catch (err) {
       if (err?.name === "AbortError") throw err;
@@ -215,18 +415,27 @@ export async function suggestSiteAddresses(query, { limit = 7, signal, biasLat, 
 }
 
 /**
- * Resolve a US street address to lat/lng (best single match).
+ * Resolve a US street address (or lat/lng) to coordinates (best single match).
  */
 export async function geocodeSiteAddress(address, options = {}) {
+  const q = cleanAddress(address);
+  const coords = parseLatLngQuery(q);
+  if (coords) return coordHit(coords.lat, coords.lng);
+
   const variants = buildGeocodeVariants(address);
   if (!variants.length) throw new Error("Enter an address to search.");
 
   let lastError = null;
 
-  for (const q of variants) {
+  for (const variant of variants) {
     try {
-      const hits = await suggestSiteAddresses(q, { limit: 5, ...options });
-      if (hits.length) return hits[0];
+      const { hits, lastError: err } = await fetchMergedHits(variant, {
+        limit: 5,
+        ...options,
+      });
+      if (err) lastError = err;
+      const ranked = dedupeHits(hits);
+      if (ranked.length) return ranked[0];
     } catch (err) {
       if (err?.name === "AbortError") throw err;
       lastError = err;
@@ -236,6 +445,6 @@ export async function geocodeSiteAddress(address, options = {}) {
 
   throw (
     lastError ||
-    new Error("Address not found. Try street, city, and state (ZIP optional).")
+    new Error("Address not found. Try street, city, and state (ZIP optional), or lat, lng.")
   );
 }

@@ -12,8 +12,11 @@ export function createEmptySiteMap(overrides = {}) {
     address: "",
     lat: null,
     lng: null,
+    /** Camera center for proposal preview / PDF (independent of site pin). */
+    viewLat: null,
+    viewLng: null,
     zoom: 19,
-    mapLocked: true,
+    mapLocked: false,
     towers: [],
     bakedImageDataUrl: null,
     ...overrides,
@@ -56,12 +59,22 @@ export function normalizeSiteMap(raw) {
       ? Number(raw.lon)
       : null;
   const zoom = Number.isFinite(Number(raw.zoom)) ? Number(raw.zoom) : 19;
+  const viewLat = Number.isFinite(Number(raw.viewLat))
+    ? Number(raw.viewLat)
+    : null;
+  const viewLng = Number.isFinite(Number(raw.viewLng))
+    ? Number(raw.viewLng)
+    : Number.isFinite(Number(raw.viewLon))
+      ? Number(raw.viewLon)
+      : null;
   return createEmptySiteMap({
     address: typeof raw.address === "string" ? raw.address : "",
     lat,
     lng,
+    viewLat,
+    viewLng,
     zoom: Math.min(22, Math.max(1, zoom)),
-    mapLocked: raw.mapLocked !== false,
+    mapLocked: raw.mapLocked === true,
     towers,
     bakedImageDataUrl: typeof raw.bakedImageDataUrl === "string" ? raw.bakedImageDataUrl : null,
   });
@@ -70,6 +83,18 @@ export function normalizeSiteMap(raw) {
 export function siteMapHasLayout(siteMap) {
   const s = normalizeSiteMap(siteMap);
   return s.lat != null && s.lng != null;
+}
+
+/** True when enough towers are placed for the system size (5.6 kW/tower).
+ * Projects with no size do not require a site map. Otherwise address + tower count must match.
+ */
+export function siteMapMeetsTowerRequirement(siteMap, projectKw) {
+  const kw = Number(projectKw) || 0;
+  const needed = kw > 0 ? Math.ceil(kw / 5.6) : 0;
+  if (needed <= 0) return true;
+  const s = normalizeSiteMap(siteMap);
+  if (!siteMapHasLayout(s)) return false;
+  return s.towers.length >= needed;
 }
 
 /** Meters per CSS pixel at lat/zoom (Web Mercator). */

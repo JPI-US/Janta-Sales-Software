@@ -40,7 +40,9 @@ import {
   towersLatLngBounds,
   towersNeededForKw,
 } from "./siteMapLayout.js";
-import { geocodeSiteAddress, suggestSiteAddresses } from "./siteMapGeocode.js";
+import { geocodeSiteAddress, parseLatLngQuery, simplifyAddressLabel, suggestSiteAddresses } from "./siteMapGeocode.js";
+import { applySiteMapCamera } from "./siteMapCamera.js";
+import { TOWER_RADIUS_STYLE, TOWER_ROTATION_RADIUS_M, ensureRadiiPane } from "./siteMapRadii.js";
 
 const C = {
   navy: "#2F3B4C",
@@ -140,6 +142,7 @@ export default function SiteMapEditor({
   const mapRef = useRef(null);
   const markersRef = useRef(new Map());
   const pinRef = useRef(null);
+  const rotationCirclesRef = useRef(new Map());
   const lockedMinZoomRef = useRef(null);
   const siteMapRef = useRef(siteMap);
   const selectedIdsRef = useRef([]);
@@ -156,6 +159,9 @@ export default function SiteMapEditor({
   const zoomPersistTimerRef = useRef(null);
   const zoomIconRafRef = useRef(null);
   const lastIconZoomRef = useRef(null);
+  const applyingCameraRef = useRef(false);
+  /** Ignore moveend/zoomend persist while we programmatically set the camera. */
+  const suppressCameraPersistRef = useRef(false);
   const undoStackRef = useRef([]);
   const applyingUndoRef = useRef(false);
   const rotationUndoArmedRef = useRef(false);
@@ -185,7 +191,7 @@ export default function SiteMapEditor({
   snapEnabledRef.current = snapEnabled;
 
   const normalized = normalizeSiteMap(siteMap);
-  const mapLocked = normalized.mapLocked !== false;
+  const mapLocked = normalized.mapLocked === true;
   const towerCount = normalized.towers.length;
   const groupRotation =
     towerCount > 0
@@ -218,6 +224,8 @@ export default function SiteMapEditor({
       address: n.address,
       lat: n.lat,
       lng: n.lng,
+      viewLat: n.viewLat,
+      viewLng: n.viewLng,
       zoom: n.zoom,
       mapLocked: n.mapLocked,
       towers: (n.towers || []).map((t) => ({ ...t })),
@@ -283,6 +291,8 @@ export default function SiteMapEditor({
     positions.forEach((pos, tid) => {
       const m = markersRef.current.get(tid);
       if (m && pos) m.setLatLng([pos.lat, pos.lng]);
+      const circle = rotationCirclesRef.current.get(tid);
+      if (circle && pos) circle.setLatLng([pos.lat, pos.lng]);
     });
   }
 
@@ -344,34 +354,110 @@ export default function SiteMapEditor({
       return;
     }
     if (!pinRef.current) {
-      pinRef.current = L.marker([sm.lat, sm.lng], {
+      const marker = L.marker([sm.lat, sm.lng], {
         icon: sitePinIcon(),
-        interactive: false,
+        draggable: true,
+        autoPan: true,
         keyboard: false,
         zIndexOffset: 800,
       }).addTo(map);
+      marker.on("dragstart", () => {
+        justDraggedRef.current = true;
+      });
+      marker.on("dragend", () => {
+        const ll = marker.getLatLng();
+        patch(
+          {
+            lat: ll.lat,
+            lng: ll.lng,
+            // Pin move keeps towers where they are — only relocates the site marker.
+          },
+          { recordUndo: true }
+        );
+        lastCenterKeyRef.current = "";
+        requestAnimationFrame(() => {
+          applyLockMode(normalizeSiteMap({ ...siteMapRef.current, lat: ll.lat, lng: ll.lng }));
+        });
+        setTimeout(() => {
+          justDraggedRef.current = false;
+        }, 40);
+      });
+      pinRef.current = marker;
     } else {
-      pinRef.current.setLatLng([sm.lat, sm.lng]);
+      const cur = pinRef.current.getLatLng();
+      if (Math.abs(cur.lat - sm.lat) > 1e-9 || Math.abs(cur.lng - sm.lng) > 1e-9) {
+        pinRef.current.setLatLng([sm.lat, sm.lng]);
+      }
+      if (!pinRef.current.dragging?.enabled()) {
+        pinRef.current.dragging?.enable();
+      }
     }
+  }
+
+  /** Rotation sweep circles — always shown for every placed tower (matches proposal/PDF). */
+  function syncRotationCircles(sm) {
+    const map = mapRef.current;
+    if (!map) return;
+    ensureRadiiPane(map);
+    const towers = (sm.towers || []).filter((t) => t.lat != null && t.lng != null);
+    const radiusM = TOWER_ROTATION_RADIUS_M;
+    const keep = new Set();
+
+    towers.forEach((tower) => {
+      keep.add(tower.id);
+      let circle = rotationCirclesRef.current.get(tower.id);
+      if (!circle) {
+        circle = L.circle([tower.lat, tower.lng], {
+          ...TOWER_RADIUS_STYLE,
+          radius: radiusM,
+          pane: "jantaRadii",
+        }).addTo(map);
+        rotationCirclesRef.current.set(tower.id, circle);
+      } else {
+        circle.setLatLng([tower.lat, tower.lng]);
+        circle.setRadius(radiusM);
+      }
+    });
+
+    rotationCirclesRef.current.forEach((circle, id) => {
+      if (keep.has(id)) return;
+      circle.remove();
+      rotationCirclesRef.current.delete(id);
+    });
   }
 
   function applyLockMode(sm, { forceFit = false } = {}) {
     const map = mapRef.current;
     if (!map || sm.lat == null || sm.lng == null) return;
 
-    if (sm.mapLocked !== false) {
+    if (sm.mapLocked === true) {
       const towerBounds = towersLatLngBounds(sm.towers, 45);
       const bounds = L.latLngBounds(
         towerBounds || siteLockBounds(sm.lat, sm.lng, SITE_LOCK_PAD_METERS)
       );
       map.setMaxBounds(bounds.pad(0.08));
       map.options.maxBoundsViscosity = 1.0;
+      const savedZoom = Number(sm.zoom);
+      const hasView = Number.isFinite(sm.viewLat) && Number.isFinite(sm.viewLng);
       if (towerBounds) {
         map.setMinZoom(14);
-        const savedZoom = Number(sm.zoom);
         const preferSaved =
           !forceFit && Number.isFinite(savedZoom) && savedZoom >= 14;
-        if (preferSaved) {
+        if (preferSaved && hasView) {
+          applyingCameraRef.current = true;
+          suppressCameraPersistRef.current = true;
+          map.setView(
+            [sm.viewLat, sm.viewLng],
+            Math.min(SITE_MAP_MAX_ZOOM, savedZoom),
+            { animate: false }
+          );
+          requestAnimationFrame(() => {
+            applyingCameraRef.current = false;
+            setTimeout(() => {
+              suppressCameraPersistRef.current = false;
+            }, 50);
+          });
+        } else if (preferSaved) {
           map.setView(
             [
               (bounds.getSouth() + bounds.getNorth()) / 2,
@@ -390,32 +476,117 @@ export default function SiteMapEditor({
       } else {
         map.setMinZoom(SITE_LOCK_MIN_ZOOM);
         lockedMinZoomRef.current = SITE_LOCK_MIN_ZOOM;
-        const z = Number(sm.zoom);
+        const z = Number.isFinite(savedZoom) && savedZoom >= SITE_LOCK_MIN_ZOOM
+          ? Math.min(SITE_MAP_MAX_ZOOM, savedZoom)
+          : SITE_LOCK_ZOOM;
+        applyingCameraRef.current = true;
         map.setView(
-          [sm.lat, sm.lng],
-          Number.isFinite(z) && z >= SITE_LOCK_MIN_ZOOM
-            ? Math.min(SITE_MAP_MAX_ZOOM, z)
-            : SITE_LOCK_ZOOM,
+          hasView && !forceFit ? [sm.viewLat, sm.viewLng] : [sm.lat, sm.lng],
+          z,
           { animate: false }
         );
+        requestAnimationFrame(() => {
+          applyingCameraRef.current = false;
+        });
       }
     } else {
       map.setMaxBounds(null);
       map.options.maxBoundsViscosity = 0;
       map.setMinZoom(1);
       lockedMinZoomRef.current = null;
+      if (!forceFit && Number.isFinite(sm.viewLat) && Number.isFinite(sm.viewLng)) {
+        const z = Number(sm.zoom);
+        applyingCameraRef.current = true;
+        map.setView(
+          [sm.viewLat, sm.viewLng],
+          Number.isFinite(z) ? Math.min(SITE_MAP_MAX_ZOOM, z) : SITE_LOCK_ZOOM,
+          { animate: false }
+        );
+        requestAnimationFrame(() => {
+          applyingCameraRef.current = false;
+        });
+      }
     }
   }
 
-  function persistZoomQuiet(z) {
+  function persistCameraQuiet({ zoom, viewLat, viewLng } = {}) {
+    if (applyingCameraRef.current || suppressCameraPersistRef.current) return;
+    const map = mapRef.current;
     const sm = normalizeSiteMap(siteMapRef.current);
-    const nextZ = Math.round(Number(z) * 100) / 100;
-    if (!Number.isFinite(nextZ)) return;
-    if (Number.isFinite(sm.zoom) && Math.abs(sm.zoom - nextZ) < 0.02) return;
-    // Shared zoom for editor + proposal preview + proposal section (+ PDF bake).
-    const next = { ...sm, zoom: nextZ, bakedImageDataUrl: null };
+    const center = map?.getCenter?.();
+    const nextZ = Math.round(Number(zoom != null ? zoom : map?.getZoom?.()) * 100) / 100;
+    const nextLat = Number.isFinite(Number(viewLat))
+      ? Number(viewLat)
+      : center
+        ? Math.round(center.lat * 1e7) / 1e7
+        : sm.viewLat;
+    const nextLng = Number.isFinite(Number(viewLng))
+      ? Number(viewLng)
+      : center
+        ? Math.round(center.lng * 1e7) / 1e7
+        : sm.viewLng;
+    if (!Number.isFinite(nextZ) || !Number.isFinite(nextLat) || !Number.isFinite(nextLng)) return;
+
+    const zoomSame = Number.isFinite(sm.zoom) && Math.abs(sm.zoom - nextZ) < 0.02;
+    const latSame = Number.isFinite(sm.viewLat) && Math.abs(sm.viewLat - nextLat) < 1e-7;
+    const lngSame = Number.isFinite(sm.viewLng) && Math.abs(sm.viewLng - nextLng) < 1e-7;
+    if (zoomSame && latSame && lngSame) return;
+
+    // Shared camera for editor + proposal preview + proposal section (+ PDF bake).
+    const next = {
+      ...sm,
+      zoom: nextZ,
+      viewLat: nextLat,
+      viewLng: nextLng,
+      bakedImageDataUrl: null,
+    };
     siteMapRef.current = next;
     onChange(next);
+  }
+
+  function applyCameraFromState(sm) {
+    const map = mapRef.current;
+    if (!map) return;
+    const z = Number(sm.zoom);
+    const vLat = Number(sm.viewLat);
+    const vLng = Number(sm.viewLng);
+    if (!Number.isFinite(z)) return;
+
+    const center = map.getCenter();
+    const zoomSame = Math.abs(map.getZoom() - z) < 0.05;
+    const centerSame =
+      Number.isFinite(vLat) &&
+      Number.isFinite(vLng) &&
+      Math.abs(center.lat - vLat) < 1e-5 &&
+      Math.abs(center.lng - vLng) < 1e-5;
+
+    if (Number.isFinite(vLat) && Number.isFinite(vLng)) {
+      if (zoomSame && centerSame) return;
+      applyingCameraRef.current = true;
+      suppressCameraPersistRef.current = true;
+      map.setView([vLat, vLng], Math.min(SITE_MAP_MAX_ZOOM, z), { animate: false });
+      refreshTowerIcons(true);
+      requestAnimationFrame(() => {
+        applyingCameraRef.current = false;
+        // Release after Leaflet finishes moveend from this setView.
+        setTimeout(() => {
+          suppressCameraPersistRef.current = false;
+        }, 50);
+      });
+      return;
+    }
+
+    if (zoomSame) return;
+    applyingCameraRef.current = true;
+    suppressCameraPersistRef.current = true;
+    map.setZoom(z, { animate: false });
+    refreshTowerIcons(true);
+    requestAnimationFrame(() => {
+      applyingCameraRef.current = false;
+      setTimeout(() => {
+        suppressCameraPersistRef.current = false;
+      }, 50);
+    });
   }
 
   function syncMarkers(sm, selIds) {
@@ -434,10 +605,17 @@ export default function SiteMapEditor({
       keep.add(tower.id);
       let marker = markersRef.current.get(tower.id);
       const isSel = selected.has(tower.id);
+      // Recreate markers that predate the dedicated tower pane (or lost their icon DOM).
+      if (marker && (marker.options.pane !== "jantaTowers" || !marker.getElement()?.querySelector?.(".janta-tower-body svg"))) {
+        marker.remove();
+        markersRef.current.delete(tower.id);
+        marker = null;
+      }
       if (!marker) {
         const icon = towerDivIcon(tower, zoom, isSel, towerCount);
         marker = L.marker([tower.lat, tower.lng], {
           icon,
+          pane: "jantaTowers",
           draggable: true,
           autoPan: false,
           zIndexOffset: isSel ? 900 : 600,
@@ -532,7 +710,9 @@ export default function SiteMapEditor({
           groupDragRef.current = null;
           const finish = () => {
             isGroupDraggingRef.current = false;
-            syncMarkers(normalizeSiteMap(siteMapRef.current), selectedIdsRef.current);
+            const sm = normalizeSiteMap(siteMapRef.current);
+            syncMarkers(sm, selectedIdsRef.current);
+            syncRotationCircles(sm);
           };
           if (!gd || gd.driverId !== tower.id) {
             finish();
@@ -698,13 +878,30 @@ export default function SiteMapEditor({
     mapRef.current = map;
     addCompassControl(map, "topright");
 
+    // Radii under towers: canvas overlays must not paint over DivIcon markers.
+    ensureRadiiPane(map);
+    if (!map.getPane("jantaTowers")) {
+      map.createPane("jantaTowers");
+      map.getPane("jantaTowers").style.zIndex = 650;
+    }
+    if (map.getPane("markerPane")) {
+      map.getPane("markerPane").style.zIndex = 600;
+    }
+    if (map.getPane("overlayPane")) {
+      map.getPane("overlayPane").style.zIndex = 400;
+    }
+
     const start = normalizeSiteMap(siteMapRef.current);
     if (start.lat != null && start.lng != null) {
       lastCenterKeyRef.current = `${start.lat},${start.lng}`;
-      if (start.mapLocked !== false) applyLockMode(start);
-      else map.setView([start.lat, start.lng], Math.min(SITE_MAP_MAX_ZOOM, start.zoom || 18));
+      if (start.mapLocked === true) applyLockMode(start);
+      else applySiteMapCamera(map, start);
       syncSitePin(start);
       syncMarkers(start, []);
+      // Seed shared camera if this session never saved a view yet.
+      if (!Number.isFinite(start.viewLat) || !Number.isFinite(start.viewLng)) {
+        requestAnimationFrame(() => persistCameraQuiet());
+      }
     } else {
       map.setView([39.8283, -98.5795], 4);
     }
@@ -729,7 +926,10 @@ export default function SiteMapEditor({
       });
       const z = map.getZoom();
       if (zoomPersistTimerRef.current) clearTimeout(zoomPersistTimerRef.current);
-      zoomPersistTimerRef.current = setTimeout(() => persistZoomQuiet(z), 280);
+      zoomPersistTimerRef.current = setTimeout(() => {
+        if (suppressCameraPersistRef.current || applyingCameraRef.current) return;
+        persistCameraQuiet({ zoom: z });
+      }, 280);
     };
 
     map.on("zoomstart", onZoomStart);
@@ -739,6 +939,16 @@ export default function SiteMapEditor({
     container.style.cursor = "default";
     const rightPanRef = { active: false, x: 0, y: 0 };
     let suppressMapClick = false;
+
+    const onMoveEnd = () => {
+      // Skip while right-pan is mid-gesture — wait for mouseup to settle.
+      if (rightPanRef.active) return;
+      if (isGroupDraggingRef.current) return;
+      if (applyingCameraRef.current || suppressCameraPersistRef.current) return;
+      if (zoomPersistTimerRef.current) clearTimeout(zoomPersistTimerRef.current);
+      zoomPersistTimerRef.current = setTimeout(() => persistCameraQuiet(), 180);
+    };
+    map.on("moveend", onMoveEnd);
 
     const onContextMenu = (e) => {
       e.preventDefault();
@@ -766,6 +976,8 @@ export default function SiteMapEditor({
       if (!rightPanRef.active) return;
       rightPanRef.active = false;
       container.style.cursor = "default";
+      if (zoomPersistTimerRef.current) clearTimeout(zoomPersistTimerRef.current);
+      zoomPersistTimerRef.current = setTimeout(() => persistCameraQuiet(), 80);
     };
 
     container.addEventListener("contextmenu", onContextMenu);
@@ -874,6 +1086,7 @@ export default function SiteMapEditor({
     return () => {
       map.off("zoomstart", onZoomStart);
       map.off("zoomend", onZoomEnd);
+      map.off("moveend", onMoveEnd);
       map.off("mousedown", onMouseDown);
       map.off("mousemove", onMouseMove);
       map.off("mouseup", onMouseUp);
@@ -889,6 +1102,8 @@ export default function SiteMapEditor({
       }
       markersRef.current.forEach((m) => m.remove());
       markersRef.current.clear();
+      rotationCirclesRef.current.forEach((c) => c.remove());
+      rotationCirclesRef.current.clear();
       if (pinRef.current) {
         pinRef.current.remove();
         pinRef.current = null;
@@ -905,13 +1120,13 @@ export default function SiteMapEditor({
     if (!map) return;
 
     if (sm.lat != null && sm.lng != null) {
-      const key = `${sm.lat},${sm.lng}|${sm.mapLocked !== false}|${sm.towers.length}`;
+      const key = `${sm.lat},${sm.lng}|${sm.mapLocked === true}|${sm.towers.length}`;
       if (key !== lastCenterKeyRef.current) {
         lastCenterKeyRef.current = key;
         applyLockMode(sm);
         // When unlocking, keep the current view — do not snap back to the site pin
         // (that felt like reverting the address / location).
-      } else if (sm.mapLocked !== false) {
+      } else if (sm.mapLocked === true) {
         const towerBounds = towersLatLngBounds(sm.towers, 45);
         const bounds = L.latLngBounds(
           towerBounds || siteLockBounds(sm.lat, sm.lng, SITE_LOCK_PAD_METERS)
@@ -929,6 +1144,7 @@ export default function SiteMapEditor({
 
     syncSitePin(sm);
     syncMarkers(sm, selectedIdsRef.current);
+    syncRotationCircles(sm);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [siteMap]);
 
@@ -938,17 +1154,13 @@ export default function SiteMapEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIds]);
 
-  // Keep editor camera linked to shared siteMap.zoom (proposal section / preview).
+  // Keep editor camera linked to shared siteMap view (proposal section / preview / undo).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || isGroupDraggingRef.current) return;
-    const z = Number(normalizeSiteMap(siteMap).zoom);
-    if (!Number.isFinite(z)) return;
-    if (Math.abs(map.getZoom() - z) < 0.05) return;
-    map.setZoom(z, { animate: false });
-    refreshTowerIcons(true);
+    applyCameraFromState(normalizeSiteMap(siteMap));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [siteMap?.zoom]);
+  }, [siteMap?.zoom, siteMap?.viewLat, siteMap?.viewLng]);
 
   useEffect(() => {
     const next = String(defaultAddress || "").trim();
@@ -983,7 +1195,12 @@ export default function SiteMapEditor({
       setFindError("Could not place that address on the map.");
       return;
     }
-    const label = hit.displayName || fallbackLabel || addressDraft.trim();
+    const prev = normalizeSiteMap(siteMapRef.current);
+    const label =
+      simplifyAddressLabel(hit.displayName || fallbackLabel || addressDraft.trim()) ||
+      hit.displayName ||
+      fallbackLabel ||
+      addressDraft.trim();
     skipSuggestRef.current = true;
     addressDirtyRef.current = true; // keep user/geocode choice; don't overwrite from page-1 address
     setAddressDraft(label);
@@ -991,32 +1208,69 @@ export default function SiteMapEditor({
     setSuggestOpen(false);
     setSuggestHighlight(-1);
     setFindError("");
+
+    // Relocate existing towers with the pin so changing address keeps the layout.
+    let towers = prev.towers;
+    if (
+      prev.lat != null &&
+      prev.lng != null &&
+      towers.length > 0 &&
+      (Math.abs(prev.lat - hit.lat) > 1e-8 || Math.abs(prev.lng - hit.lng) > 1e-8)
+    ) {
+      const dLat = hit.lat - prev.lat;
+      const dLng = hit.lng - prev.lng;
+      towers = towers.map((t) =>
+        t.lat == null || t.lng == null
+          ? t
+          : { ...t, lat: t.lat + dLat, lng: t.lng + dLng }
+      );
+    }
+
     const next = {
       address: label,
       lat: hit.lat,
       lng: hit.lng,
+      viewLat: hit.lat,
+      viewLng: hit.lng,
       zoom: SITE_LOCK_ZOOM,
+      towers,
       // Keep current lock preference — finding an address must not toggle lock.
     };
     patch(next, { recordUndo: true });
     lastCenterKeyRef.current = "";
     requestAnimationFrame(() => {
       const sm = normalizeSiteMap({ ...siteMapRef.current, ...next });
-      applyLockMode(sm);
+      applyLockMode(sm, { forceFit: true });
       syncSitePin(sm);
+      syncMarkers(sm, selectedIdsRef.current);
+      syncRotationCircles(sm);
+      persistCameraQuiet();
     });
   }
 
   async function findAddress() {
     const q = addressDraft.trim();
     if (!q) {
-      setFindError("Enter an address to search.");
+      setFindError("Enter an address or coordinates (lat, lng).");
       return;
     }
     // Prefer highlighted / first suggestion if the dropdown is open
     if (suggestOpen && addressSuggestions.length) {
       const idx = suggestHighlight >= 0 ? suggestHighlight : 0;
       applyGeocodeHit(addressSuggestions[idx], q);
+      return;
+    }
+    // Fast path for pasted coordinates
+    const coords = parseLatLngQuery(q);
+    if (coords) {
+      applyGeocodeHit(
+        {
+          lat: coords.lat,
+          lng: coords.lng,
+          displayName: `${coords.lat.toFixed(6)}, ${coords.lng.toFixed(6)}`,
+        },
+        q
+      );
       return;
     }
     setFinding(true);
@@ -1103,6 +1357,8 @@ export default function SiteMapEditor({
       address: sm.address || addressDraft || defaultAddress || "",
       lat,
       lng,
+      viewLat: lat,
+      viewLng: lng,
       zoom: SITE_LOCK_ZOOM,
       bakedImageDataUrl: null,
     };
@@ -1112,6 +1368,7 @@ export default function SiteMapEditor({
     requestAnimationFrame(() => {
       applyLockMode(normalizeSiteMap(next));
       syncSitePin(normalizeSiteMap(next));
+      persistCameraQuiet();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [knownLat, knownLng]);
@@ -1133,15 +1390,15 @@ export default function SiteMapEditor({
       centerLat: sm.lat,
       centerLng: sm.lng,
     });
-    patch({ towers, mapLocked: true }, { recordUndo: true });
+    patch({ towers }, { recordUndo: true });
     setFindError("");
     lastCenterKeyRef.current = "";
     requestAnimationFrame(() => {
-      applyLockMode(normalizeSiteMap({ ...siteMapRef.current, towers, mapLocked: true }), {
+      applyLockMode(normalizeSiteMap({ ...siteMapRef.current, towers }), {
         forceFit: true,
       });
       const map = mapRef.current;
-      if (map) persistZoomQuiet(map.getZoom());
+      if (map) persistCameraQuiet();
     });
   }
 
@@ -1151,7 +1408,7 @@ export default function SiteMapEditor({
       setFindError("Find an address first.");
       return;
     }
-    const nextLocked = !(sm.mapLocked !== false);
+    const nextLocked = !sm.mapLocked;
     // Only toggle map pan bounds — never touch address / lat / lng.
     patch({ mapLocked: nextLocked });
     lastCenterKeyRef.current = "";
@@ -1280,17 +1537,17 @@ export default function SiteMapEditor({
       rowPitchFt: TOWER_SPACING_FT,
       rotationDeg: DEFAULT_TOWER_ROTATION_DEG,
     });
-    patch({ towers, mapLocked: true }, { recordUndo: true });
+    patch({ towers }, { recordUndo: true });
     setSelectedIds([]);
     setAutoOpen(false);
     setFindError("");
     lastCenterKeyRef.current = "";
     requestAnimationFrame(() => {
-      applyLockMode(normalizeSiteMap({ ...siteMapRef.current, towers, mapLocked: true }), {
+      applyLockMode(normalizeSiteMap({ ...siteMapRef.current, towers }), {
         forceFit: true,
       });
       const map = mapRef.current;
-      if (map) persistZoomQuiet(map.getZoom());
+      if (map) persistCameraQuiet();
     });
   }
 
@@ -1343,7 +1600,11 @@ export default function SiteMapEditor({
               scheduleAddressSuggest(v);
             }}
             onBlur={() => {
-              const v = addressDraft.trim();
+              const v = simplifyAddressLabel(addressDraft.trim()) || addressDraft.trim();
+              if (v !== addressDraft.trim()) {
+                skipSuggestRef.current = true;
+                setAddressDraft(v);
+              }
               const sm = normalizeSiteMap(siteMapRef.current);
               if ((sm.address || "").trim() === v) return;
               addressDirtyRef.current = true;
@@ -1374,7 +1635,7 @@ export default function SiteMapEditor({
                 findAddress();
               }
             }}
-            placeholder="Start typing an address…"
+            placeholder="Address or lat, lng…"
             autoComplete="off"
             role="combobox"
             aria-expanded={suggestOpen}
@@ -1461,6 +1722,12 @@ export default function SiteMapEditor({
       </div>
       {findError && (
         <div style={{ fontSize: 10, color: palette.red, fontFamily: fontSans, marginBottom: 8 }}>{findError}</div>
+      )}
+      {neededCount > 0 && towerCount < neededCount && (
+        <div style={{ fontSize: 11, color: palette.red, fontFamily: fontSans, marginBottom: 8, fontWeight: 600 }}>
+          Place {neededCount} tower{neededCount === 1 ? "" : "s"} for this {Math.round(projectKw * 10) / 10} kW project
+          ({towerCount} of {neededCount} on the map). Continue is blocked until the count matches.
+        </div>
       )}
 
       <div style={{ position: "relative", borderRadius: 8, overflow: "hidden", border: `1px solid ${palette.g200}` }}>
@@ -1750,17 +2017,37 @@ export default function SiteMapEditor({
 
       <style>{`
         .janta-tower-icon, .janta-site-pin { background: transparent !important; border: none !important; overflow: visible !important; }
+        .janta-compass-control .janta-compass,
+        .janta-compass-control .janta-compass svg {
+          transform: none !important;
+        }
         .leaflet-container { font-family: ${fontSans}; }
+        .leaflet-jantaTowers-pane { z-index: 650 !important; }
+        .leaflet-jantaRadii-pane { z-index: 450 !important; pointer-events: none !important; }
         .leaflet-marker-icon.janta-tower-icon {
           overflow: visible !important;
           cursor: grab !important;
+          opacity: 1 !important;
+          visibility: visible !important;
+        }
+        .leaflet-marker-icon.janta-tower-icon .janta-tower-hit,
+        .leaflet-marker-icon.janta-tower-icon .janta-tower-spin,
+        .leaflet-marker-icon.janta-tower-icon .janta-tower-body {
+          opacity: 1 !important;
+          visibility: visible !important;
         }
         .leaflet-marker-icon.janta-tower-icon:hover {
           cursor: grab !important;
-          filter: brightness(1.08);
         }
         .leaflet-marker-icon.janta-tower-icon:active,
         .leaflet-dragging .leaflet-marker-icon.janta-tower-icon {
+          cursor: grabbing !important;
+        }
+        .leaflet-marker-icon.janta-site-pin {
+          cursor: grab !important;
+        }
+        .leaflet-marker-icon.janta-site-pin:active,
+        .leaflet-dragging .leaflet-marker-icon.janta-site-pin {
           cursor: grabbing !important;
         }
         .leaflet-top.leaflet-left { margin-top: 52px; }
