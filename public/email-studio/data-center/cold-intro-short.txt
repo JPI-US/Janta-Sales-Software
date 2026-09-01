@@ -1,0 +1,18 @@
+Subject: {{Company}} + denser on-site solar without the acreage
+
+Hi {{FirstName}},
+
+Data centers rarely have spare acres for flat solar—but they do need denser, dispatchable-friendly clean power next to load.
+
+Janta Power builds sun-tracking 3D solar towers that deliver about 50% more energy and roughly 3× power per unit area versus traditional arrays—designed for land-constrained commercial and industrial sites.
+
+Worth a brief look for {{Company}}’s campus or next build?
+
+Happy to share a one-page site brief or hop on a 15-minute call.
+
+Best,
+{{YourName}}
+{{YourTitle}} · Janta Power
+jantaus.com
+
+More Power. Less Land. · Dallas, TX

@@ -27,6 +27,21 @@ export function formatUsd(amount) {
   return `$${Math.round(amount).toLocaleString()}`;
 }
 
+/** Short currency for charts: 6072500 → $6.1M, 1500000 → $1.5M, 450000 → $450K */
+export function formatUsdCompact(amount) {
+  if (!Number.isFinite(amount)) return "—";
+  const abs = Math.abs(amount);
+  const sign = amount < 0 ? "-" : "";
+  const fmtScaled = (n, suffix) => {
+    let s = n.toFixed(1);
+    s = s.replace(/\.0$/, "");
+    return `${sign}$${s}${suffix}`;
+  };
+  if (abs >= 1_000_000) return fmtScaled(abs / 1_000_000, "M");
+  if (abs >= 1_000) return fmtScaled(abs / 1_000, "K");
+  return formatUsd(amount);
+}
+
 export function formatUsdRange(low, high) {
   if (!Number.isFinite(low) || !Number.isFinite(high)) return "—";
   if (Math.round(low) === Math.round(high)) return formatUsd(low);

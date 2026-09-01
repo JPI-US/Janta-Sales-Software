@@ -75,6 +75,9 @@ export function buildProposalSnapshot(s) {
     shHour: s.shHour,
     showProposalPageBreaks: s.showProposalPageBreaks,
     startPermissionsOnNewPage: s.startPermissionsOnNewPage,
+    grossCost: s.grossCost,
+    grossCostLow: s.grossCostLow,
+    grossCostHigh: s.grossCostHigh,
   };
 }
 

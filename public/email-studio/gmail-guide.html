@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gmail setup guide — Janta Power</title>
+    <link rel="icon" type="image/png" href="/assets/janta-logo.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #151f28;
+        --panel: #1a2332;
+        --text: #e8eef4;
+        --muted: #a8bdd0;
+        --horizon: #3a84dc;
+        --line: rgba(255, 255, 255, 0.12);
+        --code-bg: rgba(0, 0, 0, 0.35);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "DM Sans", Helvetica Neue, Helvetica, Arial, sans-serif;
+        background:
+          radial-gradient(ellipse 70% 40% at 100% 0%, rgba(58, 132, 220, 0.18), transparent 55%),
+          linear-gradient(165deg, #151f28 0%, #1a2332 50%, #264055 100%);
+        color: var(--text);
+        line-height: 1.55;
+        min-height: 100vh;
+      }
+
+      .top {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 28px 20px 0;
+      }
+
+      .back {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--horizon);
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .back:hover {
+        text-decoration: underline;
+      }
+
+      article {
+        max-width: 720px;
+        margin: 20px auto 48px;
+        padding: 32px 28px;
+        background: rgba(26, 35, 50, 0.92);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: 28px;
+        letter-spacing: -0.02em;
+        line-height: 1.2;
+      }
+
+      h2 {
+        margin: 32px 0 12px;
+        font-size: 18px;
+        color: #fff;
+      }
+
+      h3 {
+        margin: 24px 0 10px;
+        font-size: 15px;
+        color: #fff;
+      }
+
+      p,
+      li {
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      p {
+        margin: 0 0 14px;
+      }
+
+      a {
+        color: var(--horizon);
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.9em;
+        background: var(--code-bg);
+        color: #dce8f5;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+
+      ol,
+      ul {
+        margin: 0 0 14px;
+        padding-left: 1.25rem;
+      }
+
+      li {
+        margin: 0 0 8px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 12px 0 8px;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+      }
+
+      th {
+        background: rgba(0, 0, 0, 0.25);
+        color: #fff;
+        font-weight: 600;
+      }
+
+      strong {
+        color: #fff;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="top">
+      <a class="back" href="/">← Back to Email Studio</a>
+    </div>
+    <article>
+      <h1>How to use these emails in Gmail</h1>
+      <p>
+        Use <strong>Email Studio</strong> (<code>npm run dev</code> →
+        <a href="/">http://localhost:5173/</a>) to preview and copy templates. Brand tokens live in
+        <code>emails/brand.md</code>.
+      </p>
+
+      <h2>Before you send</h2>
+      <ol>
+        <li>
+          Replace placeholders:
+          <code>{{FirstName}}</code>, <code>{{Company}}</code>, <code>{{YourName}}</code>,
+          <code>{{YourTitle}}</code>, <code>{{YourEmail}}</code>, <code>{{CalendarLink}}</code>.
+        </li>
+        <li>Prefer <strong>Chrome</strong> when pasting HTML into Gmail.</li>
+        <li>
+          Logo file: <code>assets/janta-logo.png</code>. <strong>Copy HTML</strong> rewrites it to
+          your local server URL while the studio is running. For real sends, host the logo on a
+          public HTTPS URL (e.g. jantaus.com) and update the image <code>src</code>.
+        </li>
+        <li>For deliverability-sensitive outreach, use the matching <code>.txt</code> twin.</li>
+      </ol>
+
+      <h2>Save message templates (Gmail Templates)</h2>
+      <ol>
+        <li>Gmail → <strong>Settings</strong> → <strong>See all settings</strong> → <strong>Advanced</strong>.</li>
+        <li>Enable <strong>Templates</strong> → <strong>Save Changes</strong>.</li>
+        <li>In Email Studio, pick a template → <strong>Copy HTML</strong>.</li>
+        <li>Compose a new email in Gmail → paste into the body.</li>
+        <li>Replace placeholders and set the subject (suggested in each <code>.txt</code> file).</li>
+        <li>
+          Compose → <strong>More options</strong> (⋮) → <strong>Templates</strong> →
+          <strong>Save draft as template</strong> → <strong>Save as new template</strong>.
+        </li>
+        <li>Reuse: Compose → ⋮ → <strong>Templates</strong> → <strong>Insert template</strong>.</li>
+      </ol>
+
+      <h3>Recommended template set</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Gmail template name</th>
+            <th>File</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>DC — Cold short</td>
+            <td><code>data-center/cold-intro-short.html</code></td>
+          </tr>
+          <tr>
+            <td>DC — Cold rich</td>
+            <td><code>data-center/cold-intro-rich.html</code></td>
+          </tr>
+          <tr>
+            <td>DC — Follow-up</td>
+            <td><code>data-center/follow-up.html</code></td>
+          </tr>
+          <tr>
+            <td>DC — Meeting</td>
+            <td><code>data-center/meeting-request.html</code></td>
+          </tr>
+          <tr>
+            <td>DC — Case study</td>
+            <td><code>data-center/case-study.html</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Pasting HTML cleanly</h2>
+      <ul>
+        <li>Paste into the <strong>compose body</strong>, not the subject line.</li>
+        <li>Avoid nesting rich templates inside long reply chains.</li>
+        <li>
+          Swap <code>{{CalendarLink}}</code> for Calendly, HubSpot Meetings, or your booking URL.
+        </li>
+      </ul>
+
+      <h2>Plain text</h2>
+      <p>
+        Each HTML file has a twin <code>.txt</code> in the same folder. Use it when HTML may be
+        stripped or you want a lighter first touch.
+      </p>
+
+      <h2>Quick QA checklist</h2>
+      <ul>
+        <li>Placeholders replaced</li>
+        <li>Logo loads (public HTTPS URL for real sends)</li>
+        <li>Links open (jantaus.com, mailto, calendar)</li>
+        <li>Metrics and claims match current site messaging</li>
+        <li>Test send to yourself in Gmail web + mobile</li>
+      </ul>
+    </article>
+  </body>
+</html>

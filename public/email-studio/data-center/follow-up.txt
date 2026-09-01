@@ -1,0 +1,15 @@
+Subject: Quick follow-up — {{Company}} + 3D solar density
+
+Hi {{FirstName}},
+
+Circling back on denser on-site solar for {{Company}}. One update that may be useful: we’re piloting our 3D energy production approach with Munich Airport—another land-constrained, always-on infrastructure environment.
+
+Airports and data campuses share the same constraint: limited footprint, high reliability expectations, and pressure to add clean capacity near load.
+
+If it’s easier, reply with a time that works—or grab a slot here:
+{{CalendarLink}}
+
+Thanks,
+{{YourName}}
+{{YourTitle}} · Janta Power
+jantaus.com

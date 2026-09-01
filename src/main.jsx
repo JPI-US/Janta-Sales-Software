@@ -5,35 +5,20 @@ import "@fontsource/inter/600.css";
 import "@fontsource/inter/700.css";
 import ProposalApp from "./ProposalApp.jsx";
 import * as authApi from "./authApi.js";
-import { slugifyUsername, uniqueUsernameFromDisplayName } from "../shared/authUsername.js";
+import { proposalStorageKey } from "../shared/proposalAccount.js";
+import { confirmSignOut } from "./appIcons.jsx";
+import "./themeTransition.css";
 
 const THEME_KEY = "janta_dark_mode_v1";
-
-function isSettingsSuccessMessage(msg) {
-  if (!msg || typeof msg !== "string") return false;
-  return /^(Email updated|Password updated|User added|User removed|Role updated)/i.test(msg.trim());
-}
 
 function AuthGate() {
   const [authLoading, setAuthLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
-  const [teamMembers, setTeamMembers] = useState([]);
   const [loginId, setLoginId] = useState("");
   const [password, setPassword] = useState("");
   const [rememberLogin, setRememberLogin] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsCurrentEmail, setSettingsCurrentEmail] = useState("");
-  const [settingsNewEmail, setSettingsNewEmail] = useState("");
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [settingsMsg, setSettingsMsg] = useState("");
-  const [addUserName, setAddUserName] = useState("");
-  const [addUserEmail, setAddUserEmail] = useState("");
-  const [addUserPassword, setAddUserPassword] = useState("");
-  const [addUserConfirm, setAddUserConfirm] = useState("");
   const [appDarkMode, setAppDarkMode] = useState(() => {
     try {
       return localStorage.getItem(THEME_KEY) === "1";
@@ -41,8 +26,6 @@ function AuthGate() {
       return false;
     }
   });
-
-  const currentUserIsAdmin = Boolean(currentUser?.isAdmin);
 
   useEffect(() => {
     authApi
@@ -63,12 +46,18 @@ function AuthGate() {
       setCurrentUser(user);
       setError("");
       resetForm();
+      try {
+        sessionStorage.removeItem(`janta_app_nav_v1_${proposalStorageKey(user)}`);
+      } catch (_err) {
+        // ignore
+      }
     } catch (err) {
       setError(err.message || "Invalid username/email or password.");
     }
   }
 
   async function handleSignOut() {
+    if (!confirmSignOut()) return;
     const uid = currentUser?.id;
     try {
       await authApi.logout();
@@ -76,168 +65,12 @@ function AuthGate() {
       // ignore — cookie is cleared client-side regardless
     }
     setCurrentUser(null);
-    setTeamMembers([]);
-    setSettingsOpen(false);
-    setSettingsMsg("");
     if (uid) {
       try {
         sessionStorage.removeItem(`janta_app_nav_v1_${uid}`);
       } catch (_err) {
         // ignore
       }
-    }
-  }
-
-  function openSettings() {
-    if (!currentUser) return;
-    setSettingsCurrentEmail(currentUser.email || "");
-    setSettingsNewEmail("");
-    setCurrentPassword("");
-    setNewPassword("");
-    setConfirmPassword("");
-    setAddUserName("");
-    setAddUserEmail("");
-    setAddUserPassword("");
-    setAddUserConfirm("");
-    setSettingsMsg("");
-    setSettingsOpen(true);
-    if (currentUserIsAdmin) {
-      authApi
-        .listTeam()
-        .then(setTeamMembers)
-        .catch(() => setTeamMembers([]));
-    }
-  }
-
-  /** Only removable if not you and not a protected (bootstrap) admin account. */
-  function canRemoveUser(target) {
-    if (!target || !currentUser) return false;
-    if (target.id === currentUser.id) return false;
-    if (target.protected) return false;
-    return currentUserIsAdmin;
-  }
-
-  function canChangeUserRole(target) {
-    if (!currentUserIsAdmin || !target || !currentUser) return false;
-    if (target.id === currentUser.id) return false;
-    if (target.protected) return false;
-    return true;
-  }
-
-  async function setUserRole(target, nextIsAdmin) {
-    if (!canChangeUserRole(target)) return;
-    const wantAdmin = Boolean(nextIsAdmin);
-    try {
-      const updated = await authApi.setTeamMemberRole(target.id, wantAdmin);
-      setTeamMembers((prev) => prev.map((u) => (u.id === target.id ? updated : u)));
-      setSettingsMsg(`Role updated: ${target.name || target.username} is now ${wantAdmin ? "Admin" : "Member"}.`);
-    } catch (err) {
-      setSettingsMsg(err.message || "Could not update role.");
-    }
-  }
-
-  async function addInviteUser() {
-    if (!currentUser || !currentUserIsAdmin) return;
-    const name = addUserName.trim();
-    const cleanEmail = addUserEmail.trim().toLowerCase();
-    if (!name) {
-      setSettingsMsg("Display name is required — it becomes their sign-in username.");
-      return;
-    }
-    if (!cleanEmail.includes("@")) {
-      setSettingsMsg("Enter a valid email address for the new user.");
-      return;
-    }
-    if (!slugifyUsername(name)) {
-      setSettingsMsg("Display name must include at least one letter or number for the username.");
-      return;
-    }
-    if (!addUserPassword || addUserPassword.length < 6) {
-      setSettingsMsg("Password must be at least 6 characters.");
-      return;
-    }
-    if (addUserPassword !== addUserConfirm) {
-      setSettingsMsg("Password and confirm password must match.");
-      return;
-    }
-    try {
-      const created = await authApi.addTeamMember(name, cleanEmail, addUserPassword);
-      setTeamMembers((prev) => [...prev, created]);
-      setSettingsMsg("User added.");
-      setAddUserName("");
-      setAddUserEmail("");
-      setAddUserPassword("");
-      setAddUserConfirm("");
-    } catch (err) {
-      setSettingsMsg(err.message || "Could not add user.");
-    }
-  }
-
-  async function removeInviteUser(target) {
-    if (!canRemoveUser(target)) return;
-    try {
-      await authApi.removeTeamMember(target.id);
-      setTeamMembers((prev) => prev.filter((u) => u.id !== target.id));
-      setSettingsMsg("User removed.");
-    } catch (err) {
-      setSettingsMsg(err.message || "Could not remove user.");
-    }
-  }
-
-  async function saveEmail() {
-    if (!currentUser) return;
-    const currentEmailInput = settingsCurrentEmail.trim().toLowerCase();
-    const cleanEmail = settingsNewEmail.trim().toLowerCase();
-    if (!currentEmailInput) {
-      setSettingsMsg("Current email is required.");
-      return;
-    }
-    if (!cleanEmail) {
-      setSettingsMsg("New email is required.");
-      return;
-    }
-    if (!currentPassword) {
-      setSettingsMsg("Enter current password to save changes.");
-      return;
-    }
-    try {
-      const updated = await authApi.updateEmail(currentEmailInput, cleanEmail, currentPassword);
-      setCurrentUser(updated);
-      setSettingsMsg("Email updated.");
-      setSettingsCurrentEmail(updated.email);
-      setSettingsNewEmail("");
-      setCurrentPassword("");
-    } catch (err) {
-      setSettingsMsg(err.message || "Could not update email.");
-    }
-  }
-
-  async function savePassword() {
-    if (!currentUser) return;
-    if (!currentPassword) {
-      setSettingsMsg("Enter current password to change password.");
-      return;
-    }
-    if (!newPassword) {
-      setSettingsMsg("Enter a new password.");
-      return;
-    }
-    if (newPassword.length < 6) {
-      setSettingsMsg("New password must be at least 6 characters.");
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      setSettingsMsg("New password and confirm password must match.");
-      return;
-    }
-    try {
-      await authApi.updatePassword(currentPassword, newPassword);
-      setSettingsMsg("Password updated.");
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-    } catch (err) {
-      setSettingsMsg(err.message || "Could not update password.");
     }
   }
 
@@ -250,300 +83,21 @@ function AuthGate() {
   }
 
   if (currentUser) {
-    const settingsBg = appDarkMode ? "#100D0A" : "#F3F4F6";
-    const panelBg = appDarkMode ? "#1A1510" : "#FFFFFF";
-    const panelBorder = appDarkMode ? "#3A2B1D" : "#DDE2E8";
-    const headingColor = appDarkMode ? "#F8F2E8" : "#2F3B4C";
-    const subtleText = appDarkMode ? "#D8C6AE" : "#6F8096";
-
     return (
-      <div style={{ minHeight: "100vh", background: appDarkMode ? "#000000" : "#F3F4F6", position: "relative" }}>
-        <ProposalApp
-          currentUser={currentUser}
-          onOpenSettings={openSettings}
-          onSignOut={handleSignOut}
-          initialDarkMode={appDarkMode}
-          onDarkModeChange={(nextDark) => {
-            setAppDarkMode(Boolean(nextDark));
-            try {
-              localStorage.setItem(THEME_KEY, nextDark ? "1" : "0");
-            } catch (_err) {
-              // ignore storage write issues
-            }
-          }}
-        />
-
-        {settingsOpen && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 2000,
-            minHeight: "100vh",
-            display: "grid",
-            placeItems: "center",
-            background: settingsBg,
-            padding: 20,
-            overflow: "auto",
-          }}
-        >
-          <div
-            style={{
-              width: "100%",
-              maxWidth: 960,
-              background: panelBg,
-              border: `1px solid ${panelBorder}`,
-              borderRadius: 12,
-              padding: 24,
-              fontFamily: "Inter, system-ui, sans-serif",
-            }}
-          >
-            <h2 style={{ margin: "0 0 14px 0", color: headingColor }}>Settings</h2>
-            <div style={{ marginBottom: 12, padding: 12, border: `1px solid ${panelBorder}`, borderRadius: 8 }}>
-              <div style={{ fontSize: 12, color: subtleText, marginBottom: 8 }}>Change email</div>
-              <input
-                value={settingsCurrentEmail}
-                onChange={(e) => setSettingsCurrentEmail(e.target.value)}
-                placeholder="Current email"
-                style={themedInputStyle(appDarkMode)}
-              />
-              <input
-                value={settingsNewEmail}
-                onChange={(e) => setSettingsNewEmail(e.target.value)}
-                placeholder="New email"
-                style={themedInputStyle(appDarkMode)}
-              />
-              <input
-                type="password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                placeholder="Current password"
-                style={themedInputStyle(appDarkMode)}
-              />
-              <button type="button" onClick={saveEmail} style={themedPrimaryButtonStyle(appDarkMode)}>
-                Update email
-              </button>
-            </div>
-
-            <div style={{ marginBottom: 12, padding: 12, border: `1px solid ${panelBorder}`, borderRadius: 8 }}>
-              <div style={{ fontSize: 12, color: subtleText, marginBottom: 8 }}>Change password</div>
-              <input
-                type="password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                placeholder="Current password"
-                style={themedInputStyle(appDarkMode)}
-              />
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="New password"
-                style={themedInputStyle(appDarkMode)}
-              />
-              <input
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="Confirm new password"
-                style={themedInputStyle(appDarkMode)}
-              />
-              <button type="button" onClick={savePassword} style={themedPrimaryButtonStyle(appDarkMode)}>
-                Update password
-              </button>
-            </div>
-
-            {currentUserIsAdmin && (
-              <div style={{ marginBottom: 12, padding: 12, border: `1px solid ${panelBorder}`, borderRadius: 8 }}>
-                <div style={{ fontSize: 12, color: subtleText, marginBottom: 4 }}>User management</div>
-                <p style={{ margin: "0 0 12px 0", fontSize: 11, color: subtleText, lineHeight: 1.45 }}>
-                  Manage team sign-in accounts. Display name becomes their username for login.
-                </p>
-
-                <div style={{ marginBottom: 14, paddingBottom: 12, borderBottom: `1px solid ${panelBorder}` }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: headingColor, marginBottom: 10 }}>
-                    Team members ({teamMembers.length})
-                  </div>
-                  {teamMembers.length === 0 ? (
-                    <div style={{ fontSize: 12, color: subtleText }}>No accounts yet.</div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {[...teamMembers]
-                        .sort((a, b) => {
-                          const aYou = a.id === currentUser.id ? 0 : 1;
-                          const bYou = b.id === currentUser.id ? 0 : 1;
-                          if (aYou !== bYou) return aYou - bYou;
-                          return String(a.name || a.username).localeCompare(String(b.name || b.username));
-                        })
-                        .map((u) => {
-                          const isYou = u.id === currentUser.id;
-                          const admin = Boolean(u.isAdmin);
-                          return (
-                            <div
-                              key={u.id}
-                              style={{
-                                display: "flex",
-                                flexWrap: "wrap",
-                                alignItems: "center",
-                                gap: 8,
-                                justifyContent: "space-between",
-                                padding: "10px 12px",
-                                borderRadius: 8,
-                                background: appDarkMode ? "#120E0A" : "#F9FAFB",
-                                border: `1px solid ${isYou ? (appDarkMode ? "#5C4A2E" : "#C8A85A") : panelBorder}`,
-                              }}
-                            >
-                              <div style={{ minWidth: 0, flex: "1 1 180px" }}>
-                                <div style={{ fontSize: 13, fontWeight: 600, color: headingColor }}>
-                                  @{u.username || "—"}
-                                  {isYou ? " (you)" : ""}
-                                </div>
-                                <div style={{ fontSize: 12, color: subtleText }}>{u.name || u.email}</div>
-                                <div style={{ fontSize: 11, color: subtleText, marginTop: 2 }}>{u.email}</div>
-                              </div>
-                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                {canChangeUserRole(u) ? (
-                                  <select
-                                    value={admin ? "admin" : "member"}
-                                    onChange={(e) => setUserRole(u, e.target.value === "admin")}
-                                    style={{
-                                      padding: "6px 10px",
-                                      borderRadius: 8,
-                                      border: `1px solid ${panelBorder}`,
-                                      background: appDarkMode ? "#1A1510" : "#fff",
-                                      color: headingColor,
-                                      fontSize: 12,
-                                      fontFamily: "Inter, system-ui, sans-serif",
-                                      cursor: "pointer",
-                                    }}
-                                  >
-                                    <option value="member">Member</option>
-                                    <option value="admin">Admin</option>
-                                  </select>
-                                ) : (
-                                  <span
-                                    style={{
-                                      fontSize: 10,
-                                      fontWeight: 700,
-                                      textTransform: "uppercase",
-                                      letterSpacing: "0.04em",
-                                      color: appDarkMode ? "#D4A15A" : "#2F3B4C",
-                                      padding: "2px 8px",
-                                      borderRadius: 999,
-                                      border: `1px solid ${panelBorder}`,
-                                    }}
-                                  >
-                                    {admin ? "Admin" : "Member"}
-                                    {u.protected ? " · Protected" : ""}
-                                  </span>
-                                )}
-                                {!isYou && canRemoveUser(u) && (
-                                  <button
-                                    type="button"
-                                    onClick={() => removeInviteUser(u)}
-                                    style={{
-                                      padding: "6px 12px",
-                                      fontSize: 12,
-                                      fontWeight: 600,
-                                      cursor: "pointer",
-                                      borderRadius: 8,
-                                      border: appDarkMode ? "1px solid #5B2921" : "1px solid #F1B8B8",
-                                      background: appDarkMode ? "#2D1612" : "#FFF5F5",
-                                      color: appDarkMode ? "#F9C8C1" : "#B42318",
-                                    }}
-                                  >
-                                    Remove
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                    </div>
-                  )}
-                </div>
-
-                <div style={{ fontSize: 11, fontWeight: 600, color: headingColor, marginBottom: 8 }}>Add member</div>
-                <input
-                  value={addUserName}
-                  onChange={(e) => setAddUserName(e.target.value)}
-                  placeholder="Display name (becomes username, e.g. Kerry Turk → kerryturk)"
-                  style={themedInputStyle(appDarkMode)}
-                />
-                {addUserName.trim() && (
-                  <div style={{ fontSize: 11, color: subtleText, margin: "-4px 0 8px 0" }}>
-                    Sign-in username: <strong style={{ color: headingColor }}>@{uniqueUsernameFromDisplayName(addUserName, addUserEmail, teamMembers)}</strong>
-                  </div>
-                )}
-                <input
-                  value={addUserEmail}
-                  onChange={(e) => setAddUserEmail(e.target.value)}
-                  placeholder="Email"
-                  type="email"
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  style={themedInputStyle(appDarkMode)}
-                />
-                <input
-                  type="password"
-                  value={addUserPassword}
-                  onChange={(e) => setAddUserPassword(e.target.value)}
-                  placeholder="Initial password"
-                  style={themedInputStyle(appDarkMode)}
-                />
-                <input
-                  type="password"
-                  value={addUserConfirm}
-                  onChange={(e) => setAddUserConfirm(e.target.value)}
-                  placeholder="Confirm initial password"
-                  style={themedInputStyle(appDarkMode)}
-                />
-                <button type="button" onClick={addInviteUser} style={themedPrimaryButtonStyle(appDarkMode)}>
-                  Add member
-                </button>
-              </div>
-            )}
-
-            {settingsMsg && (
-              <div
-                style={{
-                  color: isSettingsSuccessMessage(settingsMsg) ? "#2A9D8F" : "#F55A5A",
-                  fontSize: 12,
-                  marginBottom: 10,
-                }}
-              >
-                {settingsMsg}
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-              <button
-                type="button"
-                onClick={() => setSettingsOpen(false)}
-                style={themedSecondaryButtonStyle(appDarkMode)}
-              >
-                Back
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={handleSignOut}
-              style={{
-                width: "100%",
-                border: appDarkMode ? "1px solid #5B2921" : "1px solid #F1B8B8",
-                borderRadius: 8,
-                padding: "10px 12px",
-                background: appDarkMode ? "#2D1612" : "#FFF5F5",
-                color: appDarkMode ? "#F9C8C1" : "#B42318",
-                cursor: "pointer",
-                fontWeight: 600,
-              }}
-            >
-              Sign out
-            </button>
-          </div>
-        </div>
-        )}
-      </div>
+      <ProposalApp
+        currentUser={currentUser}
+        onUserUpdate={setCurrentUser}
+        onSignOut={handleSignOut}
+        initialDarkMode={appDarkMode}
+        onDarkModeChange={(nextDark) => {
+          setAppDarkMode(Boolean(nextDark));
+          try {
+            localStorage.setItem(THEME_KEY, nextDark ? "1" : "0");
+          } catch (_err) {
+            // ignore storage write issues
+          }
+        }}
+      />
     );
   }
 
@@ -602,9 +156,7 @@ function AuthGate() {
           boxShadow: "0 18px 40px rgba(0,0,0,0.28)",
         }}
       >
-        <h2 style={{ margin: "0 0 4px 0", color: "#2F3B4C" }}>
-          Sign in
-        </h2>
+        <h2 style={{ margin: "0 0 4px 0", color: "#2F3B4C" }}>Sign in</h2>
         <p style={{ margin: "0 0 14px 0", color: "#6F8096", fontSize: 13 }}>
           Access the Janta Proposal Generator.
         </p>
@@ -720,56 +272,6 @@ const inputStyle = {
   marginBottom: 10,
   outline: "none",
 };
-
-function themedInputStyle(isDark) {
-  if (!isDark) return inputStyle;
-  return {
-    ...inputStyle,
-    border: "1px solid #3A2B1D",
-    background: "#120E0A",
-    color: "#F8F2E8",
-  };
-}
-
-const primaryButtonStyle = {
-  flex: 1,
-  border: "none",
-  borderRadius: 8,
-  padding: "10px 12px",
-  background: "#2F3B4C",
-  color: "#fff",
-  fontWeight: 600,
-  cursor: "pointer",
-};
-
-function themedPrimaryButtonStyle(isDark) {
-  if (!isDark) return primaryButtonStyle;
-  return {
-    ...primaryButtonStyle,
-    background: "#D3A14A",
-    color: "#1B140D",
-  };
-}
-
-const secondaryButtonStyle = {
-  flex: 1,
-  border: "1px solid #DDE2E8",
-  borderRadius: 8,
-  padding: "10px 12px",
-  background: "#fff",
-  color: "#2F3B4C",
-  cursor: "pointer",
-};
-
-function themedSecondaryButtonStyle(isDark) {
-  if (!isDark) return secondaryButtonStyle;
-  return {
-    ...secondaryButtonStyle,
-    border: "1px solid #3A2B1D",
-    background: "#120E0A",
-    color: "#F8F2E8",
-  };
-}
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>

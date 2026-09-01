@@ -1,0 +1,19 @@
+Subject: 20 minutes on on-site solar density for {{Company}}
+
+Hi {{FirstName}},
+
+I’d like to walk your team through how Janta’s sun-tracking 3D solar towers could fit a data campus where land and interconnection options are tight—covering footprint, indicative energy density, and what a site screen looks like.
+
+We’ll keep it practical:
+• Where 3D towers beat flat arrays on constrained parcels
+• Proof points (~50% more energy, ~3× power/area)
+• Next step: a lightweight site brief for {{Company}}
+
+Does a 20-minute call this week or next work? You can also book directly:
+{{CalendarLink}}
+
+{{YourName}}
+{{YourTitle}} · Janta Power
+{{YourEmail}} · (469) 694-3818
+
+More Power. Less Land. · jantaus.com

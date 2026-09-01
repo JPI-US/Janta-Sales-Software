@@ -1,0 +1,44 @@
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 1.05s;
+  animation-timing-function: cubic-bezier(0.25, 0.1, 0.25, 1);
+  mix-blend-mode: normal;
+}
+
+::view-transition-old(root) {
+  z-index: 1;
+  animation-name: janta-theme-fade-out;
+}
+
+::view-transition-new(root) {
+  z-index: 2147483646;
+  animation-name: janta-theme-circle-reveal;
+}
+
+@keyframes janta-theme-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes janta-theme-circle-reveal {
+  from {
+    clip-path: circle(0px at var(--theme-transition-x) var(--theme-transition-y));
+    opacity: 0.35;
+  }
+  to {
+    clip-path: circle(var(--theme-transition-r) at var(--theme-transition-x) var(--theme-transition-y));
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(root),
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none !important;
+  }
+}

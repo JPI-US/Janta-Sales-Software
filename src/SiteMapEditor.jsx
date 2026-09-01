@@ -104,14 +104,14 @@ function sitePinIcon() {
   });
 }
 
-function mapToolBtn() {
+function mapToolBtn(palette) {
   return {
     width: 36,
     height: 36,
     borderRadius: 8,
-    border: "1px solid #DDE2E8",
-    background: "#FFFFFF",
-    color: "#2F3B4C",
+    border: `1px solid ${palette.g200}`,
+    background: palette.white,
+    color: palette.g700,
     boxShadow: "0 2px 8px rgba(0,0,0,0.28)",
     display: "flex",
     alignItems: "center",
@@ -119,6 +119,10 @@ function mapToolBtn() {
     cursor: "pointer",
     padding: 0,
   };
+}
+
+function panelSurface(palette, isDark) {
+  return isDark ? "rgba(20,20,20,0.96)" : "rgba(255,255,255,0.96)";
 }
 
 /**
@@ -134,9 +138,10 @@ export default function SiteMapEditor({
   projectKw = 0,
   colors = C,
   titleColor,
+  isDark = false,
 }) {
   const palette = colors || C;
-  const headingColor = titleColor || palette.navy;
+  const headingColor = titleColor || palette.g700;
   const mapDomId = useId().replace(/:/g, "");
   const mapElRef = useRef(null);
   const mapRef = useRef(null);
@@ -991,8 +996,8 @@ export default function SiteMapEditor({
       el.className = "janta-box-select";
       Object.assign(el.style, {
         position: "absolute",
-        border: "1.5px dashed #C9933E",
-        background: "rgba(201,147,62,0.15)",
+        border: `1.5px dashed ${palette.gold}`,
+        background: isDark ? "rgba(255,255,255,0.06)" : "rgba(201,147,62,0.15)",
         pointerEvents: "none",
         zIndex: 650,
         display: "none",
@@ -1555,7 +1560,7 @@ export default function SiteMapEditor({
   const btn = (enabled, primary = false) => ({
     padding: "8px 12px",
     background: !enabled ? palette.g300 : primary ? palette.navy : palette.white,
-    color: !enabled ? palette.g500 : primary ? "#F8F2E8" : palette.navy,
+    color: !enabled ? palette.g500 : primary ? palette.g700 : palette.g700,
     border: primary ? "none" : `1px solid ${palette.g200}`,
     borderRadius: 6,
     fontSize: 12,
@@ -1565,7 +1570,13 @@ export default function SiteMapEditor({
   });
 
   const toolDisabled = !hasCoords;
-  const lockColor = mapLocked ? "#C9933E" : "#6F8096";
+  const lockColor = mapLocked ? palette.gold : palette.g500;
+  const accentActive = palette.gold;
+  const mutedIcon = palette.g500;
+  const dangerColor = palette.red;
+  const overlayBg = panelSurface(palette, isDark);
+  const suggestActiveBg = isDark ? palette.g100 : "#F3F4F6";
+  const mapTool = () => mapToolBtn(palette);
   const selectedCount = selectedIds.length;
   const atCapacity = neededCount > 0 && towerCount >= neededCount;
 
@@ -1669,7 +1680,7 @@ export default function SiteMapEditor({
               zIndex: 1200,
               maxHeight: 260,
               overflowY: "auto",
-              background: "#fff",
+              background: palette.white,
               border: `1px solid ${palette.g200}`,
               borderRadius: 8,
               boxShadow: "0 10px 28px rgba(0,0,0,0.16)",
@@ -1697,8 +1708,8 @@ export default function SiteMapEditor({
                       borderRadius: 6,
                       padding: "8px 10px",
                       cursor: "pointer",
-                      background: active ? "#F3F1EC" : "transparent",
-                      color: palette.navy,
+                      background: active ? suggestActiveBg : "transparent",
+                      color: palette.g700,
                       fontFamily: fontSans,
                     }}
                   >
@@ -1761,7 +1772,7 @@ export default function SiteMapEditor({
             disabled={!undoCount}
             onClick={undoLast}
             title="Undo (Ctrl/Cmd+Z)"
-            style={{ ...mapToolBtn(), opacity: undoCount ? 1 : 0.4 }}
+            style={{ ...mapTool(), opacity: undoCount ? 1 : 0.4 }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
               <path d="M9 14L4 9l5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
@@ -1773,7 +1784,7 @@ export default function SiteMapEditor({
             disabled={toolDisabled}
             onClick={toggleLock}
             title={mapLocked ? "Unlock map" : "Lock map to site"}
-            style={{ ...mapToolBtn(), color: lockColor, opacity: toolDisabled ? 0.45 : 1 }}
+            style={{ ...mapTool(), color: lockColor, opacity: toolDisabled ? 0.45 : 1 }}
           >
             {mapLocked ? (
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="5" y="11" width="14" height="10" rx="2" fill="currentColor"/><path d="M8 11V8a4 4 0 0 1 8 0v3" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/></svg>
@@ -1786,7 +1797,7 @@ export default function SiteMapEditor({
             disabled={toolDisabled || atCapacity}
             onClick={addTower}
             title={atCapacity ? `At system-size limit (${neededCount})` : "Add one tower at map center"}
-            style={{ ...mapToolBtn(), opacity: toolDisabled || atCapacity ? 0.45 : 1 }}
+            style={{ ...mapTool(), opacity: toolDisabled || atCapacity ? 0.45 : 1 }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/></svg>
           </button>
@@ -1800,8 +1811,8 @@ export default function SiteMapEditor({
                 : "Auto-layout needs 4+ towers (set a larger system size)"
             }
             style={{
-              ...mapToolBtn(),
-              color: autoOpen ? "#C9933E" : "#2F3B4C",
+              ...mapTool(),
+              color: autoOpen ? accentActive : mutedIcon,
               opacity: toolDisabled || !autoLayoutAllowed ? 0.45 : 1,
             }}
           >
@@ -1823,7 +1834,7 @@ export default function SiteMapEditor({
             disabled={towerCount < 2}
             onClick={evenlySpaceTowers}
             title={selectedCount >= 2 ? "Evenly space selected towers" : "Evenly space all towers"}
-            style={{ ...mapToolBtn(), opacity: towerCount < 2 ? 0.4 : 1 }}
+            style={{ ...mapTool(), opacity: towerCount < 2 ? 0.4 : 1 }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
               <path d="M4 12h16M8 8v8M16 8v8" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"/>
@@ -1837,8 +1848,8 @@ export default function SiteMapEditor({
             onClick={() => setSnapEnabled((v) => !v)}
             title={snapEnabled ? `Snap to 5 ft grid on · min ${MIN_TOWER_SEPARATION_FT} ft between towers` : "Snap to grid off (click to turn on)"}
             style={{
-              ...mapToolBtn(),
-              color: snapEnabled ? "#C9933E" : "#6F8096",
+              ...mapTool(),
+              color: snapEnabled ? accentActive : mutedIcon,
               opacity: toolDisabled ? 0.45 : 1,
             }}
           >
@@ -1851,7 +1862,7 @@ export default function SiteMapEditor({
             disabled={!towerCount}
             onClick={selectAllTowers}
             title="Select all towers (Ctrl/Cmd+A)"
-            style={{ ...mapToolBtn(), opacity: towerCount ? 1 : 0.4 }}
+            style={{ ...mapTool(), opacity: towerCount ? 1 : 0.4 }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
               <rect x="3.5" y="3.5" width="8" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.7"/>
@@ -1865,7 +1876,7 @@ export default function SiteMapEditor({
             disabled={!towerCount}
             onClick={clearTowers}
             title="Clear all towers"
-            style={{ ...mapToolBtn(), color: towerCount ? "#C93C37" : "#6F8096", opacity: towerCount ? 1 : 0.4 }}
+            style={{ ...mapTool(), color: towerCount ? dangerColor : mutedIcon, opacity: towerCount ? 1 : 0.4 }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M5 7h14M10 7V5h4v2M8 7l1 12h6l1-12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
           </button>
@@ -1874,13 +1885,13 @@ export default function SiteMapEditor({
               type="button"
               onClick={deleteSelected}
               title={`Delete ${selectedCount} selected`}
-              style={{ ...mapToolBtn(), color: "#C93C37" }}
+              style={{ ...mapTool(), color: dangerColor }}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
             </button>
           )}
           {selectedCount > 0 && (
-            <span style={{ fontSize: 11, fontWeight: 700, color: "#F3B664", textShadow: "0 1px 3px rgba(0,0,0,0.75)", fontFamily: fontSans, marginLeft: 4 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: accentActive, textShadow: "0 1px 3px rgba(0,0,0,0.75)", fontFamily: fontSans, marginLeft: 4 }}>
               {selectedCount} selected{selectedCount > 1 ? " · drag any to move all" : ""}
             </span>
           )}
@@ -1897,17 +1908,17 @@ export default function SiteMapEditor({
               width: 260,
               padding: 12,
               borderRadius: 10,
-              background: "rgba(255,255,255,0.96)",
-              border: "1px solid #DDE2E8",
+              background: overlayBg,
+              border: `1px solid ${palette.g200}`,
               boxShadow: "0 8px 24px rgba(0,0,0,0.2)",
               fontFamily: fontSans,
             }}
           >
-            <div style={{ fontSize: 12, fontWeight: 700, color: palette.navy, marginBottom: 6 }}>Auto-layout</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: palette.g700, marginBottom: 6 }}>Auto-layout</div>
             <div style={{ fontSize: 10, color: palette.g500, lineHeight: 1.4, marginBottom: 10 }}>
-              Places exactly <strong style={{ color: palette.navy }}>{neededCount}</strong> towers
+              Places exactly <strong style={{ color: palette.g700 }}>{neededCount}</strong> towers
               ({KW_PER_TOWER} kW each) for {Math.round(projectKw * 10) / 10} kW.
-              Columns × rows set the grid shape; every tower is <strong style={{ color: palette.navy }}>{TOWER_SPACING_FT} ft</strong> apart.
+              Columns × rows set the grid shape; every tower is <strong style={{ color: palette.g700 }}>{TOWER_SPACING_FT} ft</strong> apart.
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
               <label style={{ fontSize: 10, color: palette.g500, textTransform: "uppercase", display: "block" }}>
@@ -1922,7 +1933,7 @@ export default function SiteMapEditor({
                     setAutoCols(cols);
                     setAutoRows(suggestRows(neededCount, cols));
                   }}
-                  style={{ width: "100%", marginTop: 4, padding: "6px 8px", border: `1px solid ${palette.g200}`, borderRadius: 5, fontSize: 13, boxSizing: "border-box" }}
+                  style={{ width: "100%", marginTop: 4, padding: "6px 8px", border: `1px solid ${palette.g200}`, borderRadius: 5, fontSize: 13, boxSizing: "border-box", color: palette.g700, background: palette.cream }}
                 />
               </label>
               <label style={{ fontSize: 10, color: palette.g500, textTransform: "uppercase", display: "block" }}>
@@ -1938,7 +1949,7 @@ export default function SiteMapEditor({
                     setAutoRows(rows);
                     setAutoCols(cols);
                   }}
-                  style={{ width: "100%", marginTop: 4, padding: "6px 8px", border: `1px solid ${palette.g200}`, borderRadius: 5, fontSize: 13, boxSizing: "border-box" }}
+                  style={{ width: "100%", marginTop: 4, padding: "6px 8px", border: `1px solid ${palette.g200}`, borderRadius: 5, fontSize: 13, boxSizing: "border-box", color: palette.g700, background: palette.cream }}
                 />
               </label>
             </div>
@@ -1965,8 +1976,8 @@ export default function SiteMapEditor({
               gap: 10,
               padding: "8px 12px",
               borderRadius: 10,
-              background: "rgba(255,255,255,0.95)",
-              border: "1px solid #DDE2E8",
+              background: overlayBg,
+              border: `1px solid ${palette.g200}`,
               boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
               fontFamily: fontSans,
             }}
@@ -1986,7 +1997,7 @@ export default function SiteMapEditor({
               style={{ flex: 1, minWidth: 0 }}
               title="Rotate every tower together"
             />
-            <div style={{ fontSize: 11, color: palette.navy, fontWeight: 700, minWidth: 42, textAlign: "right" }}>
+            <div style={{ fontSize: 11, color: palette.g700, fontWeight: 700, minWidth: 42, textAlign: "right" }}>
               {((groupRotation % 360) + 360) % 360}°
             </div>
             <button
@@ -1996,7 +2007,7 @@ export default function SiteMapEditor({
               style={{
                 border: `1px solid ${palette.g200}`,
                 background: palette.white,
-                color: palette.navy,
+                color: palette.g700,
                 borderRadius: 6,
                 padding: "5px 8px",
                 fontSize: 11,

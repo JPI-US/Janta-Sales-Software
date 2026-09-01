@@ -1,5 +1,6 @@
 import { dedupeProposalList } from "../shared/proposalDedupe.js";
 import { isLegacyRandomUserId, proposalStorageKey } from "../shared/proposalAccount.js";
+import { pickCrmFieldsFromBody } from "../shared/proposalCrmFields.js";
 import {
   mergeProposalLists,
   readLocalProposals,
@@ -40,10 +41,20 @@ export function deriveProposalTitle(snapshot) {
   }
   const name = String(snapshot?.custName || "").trim();
   const address = String(snapshot?.custAddress || "").trim();
-  if (name && address) return `${name} — ${address.slice(0, 40)}`;
+  if (name && address) return `${name} - ${address.slice(0, 40)}`;
   if (name) return name;
   if (address) return address.slice(0, 60);
   return `Proposal ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+}
+
+/** Short name for editors and table inputs (no trailing " Proposal"). */
+export function editableProjectTitle(proposal) {
+  const snap = proposal?.snapshot || {};
+  const fromSnap = String(snap.proposalTitle || "").trim();
+  if (fromSnap) return fromSnap;
+  const stored = String(proposal?.title || "").trim();
+  if (!stored) return "";
+  return stored.replace(/\s+Proposal$/i, "").trim() || stored;
 }
 
 function normalizeAccountKey(userOrKey) {
@@ -63,7 +74,31 @@ async function listProposalsCloudSafe(accountKey, options) {
   }
 }
 
-export async function listProposalsForUser(userOrKey, { status } = {}) {
+async function backfillLocalOnlyProposals(accountKey, merged, cloudRows, { userEmail } = {}) {
+  const cloudIds = new Set((cloudRows || []).map((p) => p.id));
+  let refreshed = cloudRows;
+  for (const row of merged) {
+    if (!row?.id || cloudIds.has(row.id)) continue;
+    try {
+      const saved = await upsertProposalCloud(accountKey, {
+        id: row.id,
+        title: row.title,
+        snapshot: row.snapshot,
+        status: row.status,
+        userEmail: String(userEmail || "").trim(),
+        ...pickCrmFieldsFromBody(row),
+      });
+      upsertLocalProposal(accountKey, withAccountKey(saved, accountKey));
+      cloudIds.add(row.id);
+      refreshed = [...refreshed.filter((p) => p.id !== saved.id), saved];
+    } catch {
+      // keep local copy; will retry on next load
+    }
+  }
+  return refreshed;
+}
+
+export async function listProposalsForUser(userOrKey, { status, userEmail } = {}) {
   const accountKey = normalizeAccountKey(userOrKey);
   if (!accountKey) return [];
 
@@ -71,7 +106,9 @@ export async function listProposalsForUser(userOrKey, { status } = {}) {
   const { rows: cloud, fromCloud } = await listProposalsCloudSafe(accountKey, { status });
 
   if (fromCloud) {
-    const merged = dedupeProposalList(mergeProposalLists(cloud, local));
+    let merged = dedupeProposalList(mergeProposalLists(cloud, local));
+    const refreshedCloud = await backfillLocalOnlyProposals(accountKey, merged, cloud, { userEmail });
+    merged = dedupeProposalList(mergeProposalLists(refreshedCloud, merged));
     writeLocalProposals(accountKey, merged);
     if (status) return merged.filter((p) => p.status === status);
     return merged;
@@ -243,3 +280,32 @@ export async function migrateLegacyProposalAccount(accountKey, legacyUserId) {
   const merged = mergeProposalLists(await listProposalsForUser(accountKey), legacyRows.map((r) => withAccountKey(r, accountKey)));
   writeLocalProposals(accountKey, merged);
 }
+
+export async function saveProposalCrmFields({ userId, id, userEmail, ...crmFields }) {
+  const accountKey = normalizeAccountKey(userId);
+  if (!accountKey || !id) throw new Error("account and proposal id are required");
+
+  const localRows = readLocalProposals(accountKey);
+  const existing = localRows.find((p) => p.id === id);
+  if (!existing) throw new Error("Proposal not found locally");
+
+  const now = new Date().toISOString();
+  const draft = { ...existing, ...crmFields, updatedAt: now };
+  upsertLocalProposal(accountKey, draft);
+
+  try {
+    const saved = await upsertProposalCloud(accountKey, {
+      id,
+      title: existing.title,
+      snapshot: existing.snapshot,
+      status: existing.status,
+      userEmail: String(userEmail || "").trim(),
+      ...pickCrmFieldsFromBody({ ...existing, ...crmFields }),
+    });
+    upsertLocalProposal(accountKey, withAccountKey(saved, accountKey));
+    return saved;
+  } catch {
+    return draft;
+  }
+}
+

@@ -1,0 +1,278 @@
+/* Email Studio embedded in Janta Sales AppShell — workspace only, no internal sidebar. */
+
+.email-studio-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+.email-studio-root.is-light {
+  --es-bg: #f3f4f6;
+  --es-panel: #ffffff;
+  --es-border: #dde2e8;
+  --es-title: #2f3b4c;
+  --es-subtle: #6f8096;
+  --es-hover: rgba(47, 59, 76, 0.06);
+  --es-active: rgba(47, 59, 76, 0.1);
+  --es-stage: #e5e7eb;
+  --es-preview-bg: #eef1f5;
+  --es-btn-primary-bg: #2f3b4c;
+  --es-btn-primary-text: #ffffff;
+  --es-btn-ghost-border: #dde2e8;
+  --es-input-bg: #ffffff;
+  --es-mail-stage: #d1d5db;
+}
+
+.email-studio-root.is-dark {
+  --es-bg: #000000;
+  --es-panel: #141414;
+  --es-border: #333333;
+  --es-title: #f3f4f6;
+  --es-subtle: #9ca3af;
+  --es-hover: rgba(255, 255, 255, 0.06);
+  --es-active: rgba(255, 255, 255, 0.1);
+  --es-stage: #111111;
+  --es-preview-bg: #0a0a0a;
+  --es-btn-primary-bg: #e5e7eb;
+  --es-btn-primary-text: #111111;
+  --es-btn-ghost-border: #333333;
+  --es-input-bg: #111111;
+  --es-mail-stage: #374151;
+}
+
+.email-studio-root {
+  --zenith: var(--es-panel);
+  --deep: var(--es-bg);
+  --mid: var(--es-title);
+  --horizon: var(--es-btn-primary-bg);
+  --muted: var(--es-subtle);
+  --text: var(--es-title);
+  --soft: var(--es-stage);
+  --divider: var(--es-border);
+  --panel: var(--es-hover);
+  background: var(--es-bg);
+  color: var(--es-title);
+}
+
+.email-studio-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.email-studio-shell .main {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  max-height: none;
+  padding: 20px 24px 32px;
+  overflow: auto;
+  background: transparent;
+  color: var(--es-title);
+}
+
+.email-studio-shell .main:has(.builder-live) {
+  overflow: hidden;
+  padding-top: 16px;
+}
+
+.email-studio-shell .home {
+  height: auto;
+  min-height: 0;
+}
+
+.email-studio-shell .home-hero h1,
+.email-studio-shell .toolbar h1,
+.email-studio-shell .builder-title,
+.email-studio-shell .home-card h2 {
+  color: var(--es-title);
+  font-family: inherit;
+}
+
+.email-studio-shell .eyebrow,
+.email-studio-shell .home-muted,
+.email-studio-shell .field span,
+.email-studio-shell .builder-label,
+.email-studio-shell .builder-meta-inline label {
+  color: var(--es-subtle);
+}
+
+.email-studio-shell .btn {
+  font-family: inherit;
+  border-radius: 8px;
+}
+
+.email-studio-shell .btn-primary {
+  background: var(--es-btn-primary-bg);
+  color: var(--es-btn-primary-text);
+  border-color: var(--es-btn-primary-bg);
+}
+
+.email-studio-shell .btn-primary:hover {
+  filter: brightness(1.05);
+}
+
+.email-studio-shell .btn-ghost {
+  border-color: var(--es-btn-ghost-border);
+  color: var(--es-title);
+  background: var(--es-panel);
+}
+
+.email-studio-shell .btn-ghost:hover {
+  background: var(--es-hover);
+  border-color: var(--es-border);
+}
+
+.email-studio-shell .home-card,
+.email-studio-shell .home-create-form,
+.email-studio-shell .home-recent-card,
+.email-studio-shell .home-card-soft {
+  background: var(--es-panel);
+  border: 1px solid var(--es-border);
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.email-studio-shell .field input,
+.email-studio-shell .field select,
+.email-studio-shell .field textarea,
+.email-studio-shell .preset-trigger,
+.email-studio-shell .builder-meta-inline input,
+.email-studio-shell .seg-filter,
+.email-studio-shell .layer-name-input,
+.email-studio-shell .props-field input,
+.email-studio-shell .props-field select,
+.email-studio-shell .props-field textarea {
+  background: var(--es-input-bg);
+  border-color: var(--es-border);
+  color: var(--es-title);
+  border-radius: 8px;
+  font-family: inherit;
+}
+
+.email-studio-shell .preset-menu {
+  background: var(--es-panel);
+  border-color: var(--es-border);
+  color: var(--es-title);
+}
+
+.email-studio-shell .preset-menu-item {
+  color: var(--es-title);
+}
+
+.email-studio-shell .preset-menu-item:hover,
+.email-studio-shell .preset-menu-item.is-selected {
+  background: var(--es-hover);
+}
+
+.email-studio-shell .home-recent button {
+  color: var(--es-title);
+}
+
+.email-studio-shell .home-recent button:hover {
+  background: var(--es-hover);
+}
+
+.email-studio-shell .stage-preview {
+  background: var(--es-preview-bg);
+}
+
+.email-studio-shell .device {
+  border-color: var(--es-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+
+.email-studio-root.is-dark .email-studio-shell .device {
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.email-studio-shell .preview-toggle-btn {
+  background: var(--es-panel);
+  border-color: var(--es-border);
+  color: var(--es-subtle);
+}
+
+.email-studio-shell .preview-toggle-btn.is-active {
+  background: var(--es-active);
+  color: var(--es-title);
+  border-color: var(--es-border);
+}
+
+.email-studio-shell .seg-palette,
+.email-studio-shell .seg-inspector {
+  background: var(--es-panel);
+  border-color: var(--es-border);
+}
+
+.email-studio-shell .layer-row {
+  background: var(--es-hover);
+  color: var(--es-title);
+}
+
+.email-studio-shell .layer-row.is-active {
+  background: var(--es-active);
+  border-color: var(--es-border);
+}
+
+.email-studio-shell .seg-chip {
+  border-color: var(--es-border);
+  background: var(--es-panel);
+  color: var(--es-title);
+}
+
+.email-studio-shell .mail-stage,
+.email-studio-shell .mail-world-plane {
+  background-color: var(--es-mail-stage);
+}
+
+.email-studio-shell .ctx-menu {
+  background: var(--es-panel);
+  border-color: var(--es-border);
+  color: var(--es-title);
+}
+
+.email-studio-shell .ctx-item {
+  color: var(--es-title);
+}
+
+.email-studio-shell .ctx-item:hover:not(:disabled) {
+  background: var(--es-hover);
+}
+
+.email-studio-shell .home-wire-mount,
+.email-studio-shell .home-stage {
+  background: var(--es-panel);
+  border-color: var(--es-border);
+}
+
+.email-studio-shell .seg-cat-head,
+.email-studio-shell .layer-hint,
+.email-studio-shell .order-hint {
+  color: var(--es-subtle);
+}
+
+.email-studio-shell .mail-view-hud,
+.email-studio-shell .builder-top,
+.email-studio-shell .toolbar-actions .btn:not(.btn-primary) {
+  color: var(--es-title);
+}
+
+.email-studio-shell .toolbar-actions .btn-primary {
+  color: var(--es-btn-primary-text);
+}
+
+.email-studio-root.is-light .email-studio-shell .home-stage-label,
+.email-studio-root.is-light .email-studio-shell .device-bar p {
+  color: var(--es-subtle);
+}
+
+@media (max-width: 900px) {
+  .email-studio-shell .main {
+    padding: 16px;
+  }
+}

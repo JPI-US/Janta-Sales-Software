@@ -28,31 +28,31 @@ export async function getProposalCloud(userId, proposalId) {
   return data.proposal;
 }
 
-export async function createProposalCloud(userId, { id, title, snapshot, status, userEmail }) {
+export async function createProposalCloud(userId, { id, title, snapshot, status, userEmail, ...crmFields }) {
   const data = await request(`/api/users/${encodeURIComponent(userId)}/proposals`, {
     method: "POST",
-    body: JSON.stringify({ id, title, snapshot, status, userEmail }),
+    body: JSON.stringify({ id, title, snapshot, status, userEmail, ...crmFields }),
   });
   return data.proposal;
 }
 
-export async function upsertProposalCloud(userId, { id, title, snapshot, status, userEmail }) {
+export async function upsertProposalCloud(userId, { id, title, snapshot, status, userEmail, ...crmFields }) {
   if (!id) throw new Error("proposal id is required");
   try {
-    return await updateProposalCloud(userId, id, { title, snapshot, status, userEmail });
+    return await updateProposalCloud(userId, id, { title, snapshot, status, userEmail, ...crmFields });
   } catch (err) {
     const msg = String(err?.message || "");
     if (!msg.includes("404") && !msg.toLowerCase().includes("not found")) throw err;
-    return createProposalCloud(userId, { id, title, snapshot, status, userEmail });
+    return createProposalCloud(userId, { id, title, snapshot, status, userEmail, ...crmFields });
   }
 }
 
-export async function updateProposalCloud(userId, proposalId, { title, snapshot, status, userEmail }) {
+export async function updateProposalCloud(userId, proposalId, { title, snapshot, status, userEmail, ...crmFields }) {
   const data = await request(
     `/api/users/${encodeURIComponent(userId)}/proposals/${encodeURIComponent(proposalId)}`,
     {
       method: "PUT",
-      body: JSON.stringify({ title, snapshot, status, userEmail }),
+      body: JSON.stringify({ title, snapshot, status, userEmail, ...crmFields }),
     }
   );
   return data.proposal;
@@ -80,3 +80,4 @@ export async function readDraftCloud(userId) {
 export async function clearDraftCloud(userId) {
   await request(`/api/users/${encodeURIComponent(userId)}/draft`, { method: "DELETE" });
 }
+

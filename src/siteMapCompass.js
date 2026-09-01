@@ -46,7 +46,7 @@ export function addCompassControl(map, position = "topright") {
 
 function lockButtonMarkup(locked) {
   const label = locked ? "Unlock map" : "Lock map to site";
-  const iconColor = locked ? "#C9933E" : "#6F8096";
+  const iconColor = locked ? "#9CA3AF" : "#6F8096";
   const icon = locked
     ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
         <rect x="5" y="11" width="14" height="10" rx="2" fill="currentColor"/>

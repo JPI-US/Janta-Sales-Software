@@ -36,6 +36,12 @@ import {
   resolveSolarPricePerKw,
   solarGrossForKw,
 } from "./src/solarPricing.js";
+import { getAppTheme, getPageScale } from "./src/appTheme.js";
+import {
+  RibbonIconButton,
+  RibbonGroup,
+  RibbonToolbar,
+} from "./src/appIcons.jsx";
 
 /** Same-origin absolute URL so image loads are unambiguous for canvas/PDF. */
 function jantaPublicAssetUrl(relativePath) {
@@ -1187,21 +1193,21 @@ const C = {
 };
 const LIGHT_C = { ...C };
 const DARK_C = {
-  navy: "#15100C",
-  navyLight: "#1D1611",
-  gold: "#C9933E",
-  goldLight: "#E4BE72",
-  white: "#14100D",
-  offWhite: "#0C0907",
-  cream: "#17120E",
-  g100: "#1F1813",
-  g200: "#2C221A",
-  g300: "#3B2D21",
-  g500: "#C1B5A5",
-  g700: "#F0E8DF",
-  green: "#80C29A",
-  red: "#E08C7E",
-  blue: "#D4A15A",
+  navy: "#111111",
+  navyLight: "#1A1A1A",
+  gold: "#D1D5DB",
+  goldLight: "#E5E7EB",
+  white: "#141414",
+  offWhite: "#0A0A0A",
+  cream: "#111111",
+  g100: "#1A1A1A",
+  g200: "#333333",
+  g300: "#404040",
+  g500: "#9CA3AF",
+  g700: "#F3F4F6",
+  green: "#6EE7B7",
+  red: "#F87171",
+  blue: "#6B7280",
 };
 
 // ─── Micro Components ───────────────────────────────────────────────
@@ -1867,16 +1873,19 @@ function calcShadow(lat, month, hour, obstH, obstD) {
 // MAIN APPLICATION
 // ═════════════════════════════════════════════════════════════════════
 export default function JantaProposal({
-  onOpenSettings,
-  onSignOut,
   initialDarkMode = false,
   onDarkModeChange,
   currentUserId = "",
   initialSnapshot = null,
   savedProposalId = null,
   savedProposalTitle = "",
-  onOpenProposals,
   onAutosaveProposal,
+  onRegisterBeforeNavigate,
+  onOpenProposals,
+  onDeleteProposal,
+  onTogglePinProposal,
+  proposalPinned = false,
+  pinRefreshKey = 0,
   autoDownloadPdf = false,
   onAutoDownloadPdfDone,
 }) {
@@ -2017,11 +2026,12 @@ export default function JantaProposal({
   const [removedCreditKeys, setRemovedCreditKeys] = useState({});
 
   const darkThemeActive = isDarkMode && !pdfLightMode;
-  const pageScale = Math.min(1.35, Math.max(1, (viewportWidth - 24) / 960));
-  const titleColor = darkThemeActive ? "#F8F2E8" : C.navy;
+  const ribbonTheme = getAppTheme(isDarkMode);
+  const pageScale = getPageScale(viewportWidth);
+  const titleColor = darkThemeActive ? "#F3F4F6" : C.navy;
   const proposalScreenDark = darkThemeActive && step === 5;
-  const chartProdColor = darkThemeActive ? "#F0C36A" : C.gold;
-  const chartUsageColor = darkThemeActive ? "#F8F2E8" : C.navy;
+  const chartProdColor = darkThemeActive ? "#D1D5DB" : C.gold;
+  const chartUsageColor = darkThemeActive ? "#F3F4F6" : C.navy;
   const chartTradColor = darkThemeActive ? "#6B7789" : C.g700;
   Object.assign(C, darkThemeActive ? DARK_C : LIGHT_C);
 
@@ -2278,15 +2288,18 @@ export default function JantaProposal({
     }
   }
 
+  const saveProposalNowRef = useRef(saveProposalNow);
+  saveProposalNowRef.current = saveProposalNow;
+
+  useEffect(() => {
+    if (typeof onRegisterBeforeNavigate !== "function") return undefined;
+    onRegisterBeforeNavigate(async () => saveProposalNowRef.current());
+    return () => onRegisterBeforeNavigate(null);
+  }, [onRegisterBeforeNavigate]);
+
   async function handleBackToProposals() {
     if (!(await saveProposalNow())) return;
     if (typeof onOpenProposals === "function") onOpenProposals();
-  }
-
-  async function handleSignOutWithSave() {
-    if (!window.confirm("Sign out? Your proposal will be saved before you leave.")) return;
-    if (!(await saveProposalNow())) return;
-    if (typeof onSignOut === "function") onSignOut();
   }
 
   // Auto-detect region from location/address instead of manual picker.
@@ -2980,6 +2993,9 @@ export default function JantaProposal({
   const grossCostLow = solarGrossLow + batteryAdd + generatorAdd;
   const grossCostHigh = solarGrossHigh + batteryAdd + generatorAdd;
   const grossCost = (grossCostLow + grossCostHigh) / 2;
+  proposalStateRef.current.grossCost = grossCost;
+  proposalStateRef.current.grossCostLow = grossCostLow;
+  proposalStateRef.current.grossCostHigh = grossCostHigh;
   const monthlyProd = monthlyProdProject;
   const monthlyTradProd = useMemo(
     () => monthlyTraditionalProd(monthlyProd, effectiveCF, traditionalCF),
@@ -3415,7 +3431,7 @@ export default function JantaProposal({
     const summaryDark = darkThemeActive && (!pdfMode || proposalScreenDark);
     const showcasePy = 8;
     const showcaseRowPad = `${showcasePy}px 0`;
-    const showcaseNetColor = darkThemeActive ? "#7EB8DC" : C.blue;
+    const showcaseNetColor = darkThemeActive ? "#9CA3AF" : C.blue;
     const showcaseNetBoxBg = summaryDark ? "#1A3044" : "#E8F2F8";
     const showcaseNetBoxBorder = summaryDark ? "#3D6280" : "#B8D4E8";
     const showcasePerW = (perW, color = C.navy) => (
@@ -3507,7 +3523,7 @@ export default function JantaProposal({
             <div style={{ marginTop: blockGap, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: pdfMode && compactMode ? 6 : 8, ...avoid }}>
               <div style={{ background: summaryDark ? "#22180F" : C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: "10px 12px" }}>
                 <div style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>Project gross</div>
-                <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.coverStat, lineHeight: 1.15 }}>
+                <div style={{ color: summaryDark ? C.g700 : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.coverStat, lineHeight: 1.15 }}>
                   {projectGrossPerWDisplay}
                 </div>
                 <div style={{ color: C.g500, fontSize: T.label, fontFamily: fontSans, marginTop: 3 }}>{grossCostDisplay}</div>
@@ -3577,7 +3593,7 @@ export default function JantaProposal({
             <div style={{ marginTop: blockGap, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: pdfMode && compactMode ? 6 : 8, ...avoid }}>
               <div style={{ background: summaryDark ? "#22180F" : C.cream, border: `1px solid ${C.g200}`, borderRadius: 8, padding: "10px 12px" }}>
                 <div style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>Gross</div>
-                <div style={{ color: summaryDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.body }}>{grossCostDisplay}</div>
+                <div style={{ color: summaryDark ? C.g700 : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.body }}>{grossCostDisplay}</div>
               </div>
               <div style={{ background: summaryDark ? "#1E2A20" : "#ECF8F5", border: summaryDark ? `1px solid ${C.g200}` : "1px solid #CBECE4", borderRadius: 8, padding: "10px 12px" }}>
                 <div style={{ color: C.g500, fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>Credits</div>
@@ -3585,7 +3601,7 @@ export default function JantaProposal({
               </div>
               <div style={{ background: summaryDark ? C.gold : C.navy, border: `1px solid ${summaryDark ? C.goldLight : C.navy}`, borderRadius: 8, padding: "10px 12px" }}>
                 <div style={{ color: summaryDark ? "#3A2A15" : "rgba(255,255,255,0.7)", fontSize: T.label, textTransform: "uppercase", fontFamily: fontSans }}>Net Cost</div>
-                <div style={{ color: summaryDark ? "#1D130A" : "#F8F2E8", fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.body }}>{netCostDisplay}</div>
+                <div style={{ color: summaryDark ? C.g700 : C.navy, fontWeight: 700, fontFamily: fontSans, marginTop: 2, fontSize: T.body }}>{netCostDisplay}</div>
               </div>
             </div>
           </>
@@ -3607,7 +3623,7 @@ export default function JantaProposal({
         }}
       >
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12, paddingBottom: 12, borderBottom: `1px dashed ${C.blue}55` }}>
-          <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: titleColor, fontFamily: fontSans, background: darkThemeActive ? "#16110D" : C.white, padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.blue}66` }}>
+          <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: titleColor, fontFamily: fontSans, background: darkThemeActive ? "#1A1A1A" : C.white, padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.blue}66` }}>
             Proposal preview
           </span>
           <span style={{ fontSize: 11, color: C.g500, fontFamily: fontSans, lineHeight: 1.4, maxWidth: 320, textAlign: "right" }}>
@@ -3694,7 +3710,7 @@ export default function JantaProposal({
       }}
     >
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12, paddingBottom: 12, borderBottom: `1px dashed ${C.blue}55` }}>
-        <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: titleColor, fontFamily: fontSans, background: darkThemeActive ? "#16110D" : C.white, padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.blue}66` }}>
+        <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: titleColor, fontFamily: fontSans, background: darkThemeActive ? "#1A1A1A" : C.white, padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.blue}66` }}>
           Proposal preview
         </span>
         <span style={{ fontSize: 11, color: C.g500, fontFamily: fontSans, lineHeight: 1.4, maxWidth: 340, textAlign: "right" }}>
@@ -3731,7 +3747,7 @@ export default function JantaProposal({
               }}
             >
               <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Preparing PDF…</div>
-              <div style={{ fontSize: 13, color: "#D8C6AE", lineHeight: 1.5 }}>
+              <div style={{ fontSize: 13, color: "#9CA3AF", lineHeight: 1.5 }}>
                 Proposal exports in standard light formatting. Dark mode resumes when finished.
               </div>
             </div>
@@ -3776,7 +3792,7 @@ export default function JantaProposal({
 
         .janta-app-root input::placeholder,
         .janta-app-root textarea::placeholder {
-          color: ${darkThemeActive ? "#D8C6AE" : C.g500};
+          color: ${darkThemeActive ? "#9CA3AF" : C.g500};
           opacity: 1;
         }
       `}</style>
@@ -3787,179 +3803,76 @@ export default function JantaProposal({
           padding: "14px 24px 12px",
           boxShadow: `0 0 0 100vmax ${C.navy}`,
           clipPath: "inset(0 -100vmax)",
+          borderBottom: darkThemeActive ? `1px solid ${C.g200}` : "none",
         }}
       >
-        <div style={{ marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <img
-            src="/assets/janta-logo-cropped.svg"
-            alt="Janta Power"
-            style={{ height: 42, width: "auto", display: "block", objectFit: "contain" }}
-          />
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {savedProposalId && savedProposalTitle && (
-              <span
-                style={{
-                  fontSize: 10,
-                  fontFamily: fontSans,
-                  color: "rgba(255,255,255,0.55)",
-                  marginTop: 8,
-                  maxWidth: 160,
-                  textAlign: "right",
-                  lineHeight: 1.3,
-                }}
-                title={savedProposalTitle}
-              >
-                {savedProposalTitle.length > 28 ? `${savedProposalTitle.slice(0, 28)}…` : savedProposalTitle}
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={() => setIsDarkMode((v) => !v)}
-              aria-label={isDarkMode ? "Switch to light mode" : "Switch to dark mode"}
-              title={isDarkMode ? "Dark mode" : "Light mode"}
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: 8,
-                border: `1px solid ${isDarkMode ? "rgba(211,161,74,0.8)" : "rgba(255,255,255,0.28)"}`,
-                background: isDarkMode
-                  ? "linear-gradient(180deg, #1A1711 0%, #0F0F0F 100%)"
-                  : "rgba(255,255,255,0.08)",
-                boxShadow: isDarkMode
-                  ? "0 0 0 1px rgba(211,161,74,0.2) inset, 0 0 12px rgba(211,161,74,0.18)"
-                  : "none",
-                color: isDarkMode ? C.goldLight : C.white,
-                cursor: "pointer",
-                fontSize: 16,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                lineHeight: 1,
-                marginTop: 8,
-              }}
-            >
-              {isDarkMode ? "🌙" : "☀️"}
-            </button>
-            <button
-              type="button"
-              onClick={onOpenSettings}
-              aria-label="Open settings"
-              title="Settings"
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: 8,
-                border: "1px solid rgba(255,255,255,0.28)",
-                background: "rgba(255,255,255,0.08)",
-                color: "#F8F2E8",
-                cursor: "pointer",
-                fontSize: 16,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                lineHeight: 1,
-                marginTop: 8,
-              }}
-            >
-              ⚙
-            </button>
-            {savedProposalId && typeof onAutosaveProposal === "function" && (
-              <button
-                type="button"
-                onClick={saveProposalNow}
-                disabled={saveBusy}
-                aria-label="Save proposal"
-                title="Save to cloud"
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: 8,
-                  border: isDarkMode ? "1px solid rgba(120,200,140,0.55)" : "1px solid rgba(80,160,100,0.75)",
-                  background: isDarkMode
-                    ? "linear-gradient(180deg, #1A4A2E 0%, #0D2E1A 100%)"
-                    : "linear-gradient(180deg, #3CB371 0%, #2A9D5C 100%)",
-                  color: "#E8FFF0",
-                  cursor: saveBusy ? "wait" : "pointer",
-                  opacity: saveBusy ? 0.7 : 1,
-                  fontSize: 16,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  lineHeight: 1,
-                  marginTop: 8,
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path
-                    d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"
-                    stroke="currentColor"
-                    strokeWidth="1.9"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path d="M17 21v-8H7v8M7 3v5h8" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            )}
-            {typeof onOpenProposals === "function" && (
-              <button
-                type="button"
+        <div style={{ marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ minWidth: 0, flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
+            {typeof onOpenProposals === "function" ? (
+              <RibbonIconButton
+                theme={ribbonTheme}
+                icon="back"
+                title="Back to Projects"
+                ariaLabel="Back to Projects"
                 onClick={handleBackToProposals}
-                aria-label="Back to proposals"
-                title="Back to proposals"
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: 8,
-                  border: isDarkMode ? "1px solid rgba(255,140,140,0.55)" : "1px solid rgba(255,120,120,0.75)",
-                  background: isDarkMode
-                    ? "linear-gradient(180deg, #4A1515 0%, #2E0D0D 100%)"
-                    : "linear-gradient(180deg, #E34B4B 0%, #C23232 100%)",
-                  color: "#FFECEC",
-                  cursor: "pointer",
-                  fontSize: 16,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  lineHeight: 1,
-                  marginTop: 8,
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <path d="M15 6l-6 6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={handleSignOutWithSave}
-              aria-label="Sign out"
-              title="Sign out"
+              />
+            ) : null}
+            <div
               style={{
-                width: 34,
-                height: 34,
-                borderRadius: 8,
-                border: isDarkMode ? "1px solid rgba(180,80,80,0.5)" : "1px solid rgba(120,28,28,0.85)",
-                background: isDarkMode
-                  ? "linear-gradient(180deg, #3D1218 0%, #1F0A0E 100%)"
-                  : "linear-gradient(180deg, #8B1A1A 0%, #5C1010 100%)",
-                color: "#FFECEC",
-                cursor: "pointer",
-                fontSize: 16,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                lineHeight: 1,
-                marginTop: 8,
+                fontSize: 18,
+                fontWeight: 700,
+                fontFamily: fontSans,
+                color: ribbonTheme.ribbonText,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                minWidth: 0,
               }}
+              title={savedProposalTitle || "Proposal"}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-                <path d="M14 16l4-4-4-4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-                <path d="M18 12H9" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
+              {savedProposalTitle || "Proposal"}
+            </div>
           </div>
+          <RibbonToolbar style={{ marginTop: 0, flexShrink: 0 }}>
+            <RibbonGroup>
+              {savedProposalId && typeof onTogglePinProposal === "function" ? (
+                <RibbonIconButton
+                  theme={ribbonTheme}
+                  icon="pin"
+                  title={proposalPinned ? "Unpin from sidebar" : "Pin to sidebar"}
+                  onClick={onTogglePinProposal}
+                  variant={proposalPinned ? "primary" : "surface"}
+                  key={`pin-${pinRefreshKey}-${proposalPinned ? "1" : "0"}`}
+                />
+              ) : null}
+              <RibbonIconButton
+                theme={ribbonTheme}
+                icon="download"
+                title={pdfExporting ? "Preparing PDF…" : "Download proposal PDF"}
+                onClick={downloadProposalPdf}
+                disabled={pdfExporting}
+              />
+              {savedProposalId && typeof onAutosaveProposal === "function" ? (
+                <RibbonIconButton
+                  theme={ribbonTheme}
+                  icon="save"
+                  title="Save to cloud"
+                  variant="success"
+                  onClick={saveProposalNow}
+                  disabled={saveBusy}
+                />
+              ) : null}
+              {savedProposalId && typeof onDeleteProposal === "function" ? (
+                <RibbonIconButton
+                  theme={ribbonTheme}
+                  icon="trash"
+                  title="Delete project"
+                  variant="danger"
+                  onClick={onDeleteProposal}
+                />
+              ) : null}
+            </RibbonGroup>
+          </RibbonToolbar>
         </div>
         {/* Step nav */}
         <div style={{ display: "flex", gap: 4 }}>
@@ -3978,10 +3891,10 @@ export default function JantaProposal({
             }} style={{
               flex: 1, padding: "10px 12px", border: "none", cursor: "pointer",
               background: isDarkMode
-                ? (step === i ? C.gold : "#E3D2B8")
+                ? (step === i ? C.gold : C.g300)
                 : step === i ? C.white : step > i ? "rgba(200,168,78,0.15)" : "rgba(255,255,255,0.05)",
               color: isDarkMode
-                ? (step === i ? "#1B140D" : "#241A12")
+                ? (step === i ? "#111111" : "#D1D5DB")
                 : step === i ? C.navy : step > i ? C.gold : "rgba(255,255,255,0.4)",
               borderRadius: "6px 6px 0 0", fontSize: 12, fontFamily: fontSans,
               fontWeight: step === i ? 700 : 400, transition: "all 0.15s",
@@ -4048,8 +3961,8 @@ export default function JantaProposal({
                     marginTop: 8,
                     padding: "12px 0",
                     boxSizing: "border-box",
-                    background: billText.length >= 20 ? (darkThemeActive ? "#E3D2B8" : C.navy) : C.g300,
-                    color: billText.length >= 20 ? (darkThemeActive ? "#1B140D" : "#fff") : C.g500,
+                    background: billText.length >= 20 ? (darkThemeActive ? "#E5E7EB" : C.navy) : C.g300,
+                    color: billText.length >= 20 ? (darkThemeActive ? "#111111" : "#fff") : C.g500,
                     border: darkThemeActive && billText.length >= 20 ? `1px solid ${C.g300}` : "none",
                     borderRadius: 8,
                     cursor: billText.length >= 20 ? "pointer" : "default",
@@ -4287,7 +4200,7 @@ export default function JantaProposal({
                               border: `2px solid ${active ? C.navy : saved ? C.green : draft ? C.gold : C.g200}`,
                               borderRadius: 8,
                               background: active ? C.navy : saved ? `${C.green}18` : draft ? `${C.gold}12` : C.white,
-                              color: active ? "#F8F2E8" : C.g700,
+                              color: active ? (darkThemeActive ? C.g700 : "#FFFFFF") : (darkThemeActive ? C.g500 : C.g700),
                               fontFamily: fontSans,
                               cursor: "pointer",
                               textAlign: "left",
@@ -4422,7 +4335,7 @@ export default function JantaProposal({
               })()}
 
             <button onClick={() => setStep(1)} style={{
-              padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none",
+              padding: "12px 0", background: darkThemeActive ? "#E5E7EB" : C.navy, color: darkThemeActive ? "#111111" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none",
               borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans,
             }}>
               Continue to System Sizing →
@@ -4441,7 +4354,7 @@ export default function JantaProposal({
 
                 <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8, paddingBottom: 10, marginBottom: 10, borderBottom: `1px solid ${C.g200}` }}>
                   <span style={{ color: C.g500, fontSize: 11, fontFamily: fontSans }}>Solar region (auto)</span>
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, background: darkThemeActive ? "rgba(228,190,114,0.18)" : `${C.gold}1F`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontFamily: fontSans, fontSize: 12, fontWeight: 600 }}>
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, background: darkThemeActive ? "rgba(255,255,255,0.08)" : `${C.gold}1F`, color: darkThemeActive ? C.g700 : C.navy, fontFamily: fontSans, fontSize: 12, fontWeight: 600 }}>
                     <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold, flexShrink: 0 }} />
                     {REGIONS[region]?.label || "Texas (Dallas area)"}
                   </div>
@@ -4516,7 +4429,7 @@ export default function JantaProposal({
                           <button key={m.id} type="button" onClick={() => setActiveMeterIdx(i)} style={{
                             border: `1px solid ${i === activeMeterIdx ? C.navy : C.g200}`,
                             background: i === activeMeterIdx ? C.navy : C.white,
-                            color: i === activeMeterIdx ? "#F8F2E8" : C.g700,
+                            color: i === activeMeterIdx ? (darkThemeActive ? C.g700 : "#FFFFFF") : C.g500,
                             borderRadius: 14, padding: "5px 11px", fontFamily: fontSans, fontSize: 11, cursor: "pointer",
                           }}>
                             {formatMeterDisplayName(m.name, m.meterNumber)}
@@ -4878,6 +4791,7 @@ export default function JantaProposal({
               projectKw={effectiveSizeProject}
               colors={C}
               titleColor={titleColor}
+              isDark={darkThemeActive}
             />
 
             {siteMapHasLayout(siteMap) && renderProposalPreviewShell(
@@ -4936,7 +4850,7 @@ export default function JantaProposal({
             )}
 
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setStep(0)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back to Bill</button>
+              <button onClick={() => setStep(0)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E5E7EB" : C.white, color: darkThemeActive ? "#111111" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back to Bill</button>
               <button
                 onClick={() => {
                   if (!siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject)) {
@@ -4954,10 +4868,10 @@ export default function JantaProposal({
                   padding: "12px 0",
                   background:
                     siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject)
-                      ? (darkThemeActive ? "#E3D2B8" : C.navy)
+                      ? (darkThemeActive ? "#E5E7EB" : C.navy)
                       : C.g300,
                   color: siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject)
-                    ? (darkThemeActive ? "#1B140D" : "#F8F2E8")
+                    ? (darkThemeActive ? "#111111" : "#F8F2E8")
                     : C.g500,
                   border: darkThemeActive && siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject) ? `1px solid ${C.g300}` : "none",
                   borderRadius: 8,
@@ -5308,8 +5222,8 @@ export default function JantaProposal({
             {renderSystemCostsSection(false)}
 
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setStep(1)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back to System</button>
-              <button onClick={() => setStep(3)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Continue to Project Financials →</button>
+              <button onClick={() => setStep(1)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E5E7EB" : C.white, color: darkThemeActive ? "#111111" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back to System</button>
+              <button onClick={() => setStep(3)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E5E7EB" : C.navy, color: darkThemeActive ? "#111111" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Continue to Project Financials →</button>
             </div>
           </div>
         )}
@@ -5379,20 +5293,20 @@ export default function JantaProposal({
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: fontSans, minWidth: 760 }}>
                     <thead>
                       <tr style={{ background: darkThemeActive ? "#211A14" : "#F1F5FB" }}>
-                        <th style={{ textAlign: "left", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Value of Energy Produced ($/MWh)</th>
+                        <th style={{ textAlign: "left", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>Value of Energy Produced ($/MWh)</th>
                         {finScenarios.map((s) => (
-                          <th key={`h-${s.price}`} style={{ textAlign: "right", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{s.price.toFixed(1)}</th>
+                          <th key={`h-${s.price}`} style={{ textAlign: "right", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>{s.price.toFixed(1)}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
                       <tr style={{ background: darkThemeActive ? "#18120E" : "#F9FBFF" }}>
                         <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#E3D7C8" : C.g700 }}>Annual Revenue</td>
-                        {finScenarios.map((s) => <td key={`ar-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy }}>{finFmtInt(s.annualRevenue)}</td>)}
+                        {finScenarios.map((s) => <td key={`ar-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? C.g700 : C.navy }}>{finFmtInt(s.annualRevenue)}</td>)}
                       </tr>
                       <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
                         <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#E3D7C8" : C.g700 }}>Annual Maintenance Costs</td>
-                        {finScenarios.map((s) => <td key={`am-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy }}>{finFmtInt(finAnnualMaintenance)}</td>)}
+                        {finScenarios.map((s) => <td key={`am-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? C.g700 : C.navy }}>{finFmtInt(finAnnualMaintenance)}</td>)}
                       </tr>
                       <tr style={{ background: darkThemeActive ? "#1A271F" : "#EEF7EE" }}>
                         <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#D9F2E3" : C.navy, fontWeight: 700 }}>Annual Profit</td>
@@ -5404,29 +5318,29 @@ export default function JantaProposal({
                       </tr>
                       <tr style={{ background: darkThemeActive ? "#1A1714" : "#F7F7F7" }}>
                         <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#E3D7C8" : C.g700, paddingTop: 10 }}>Developer Capital Investment</td>
-                        {finScenarios.map((s) => <td key={`dc-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, paddingTop: 10 }}>{finFmtInt(finDeveloperCapitalCost)}</td>)}
+                        {finScenarios.map((s) => <td key={`dc-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? C.g700 : C.navy, paddingTop: 10 }}>{finFmtInt(finDeveloperCapitalCost)}</td>)}
                       </tr>
                       <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
-                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
-                        {finScenarios.map((s) => <td key={`yb-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakeven)}</td>)}
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
+                        {finScenarios.map((s) => <td key={`yb-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakeven)}</td>)}
                       </tr>
                       <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
-                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Annual ROI %</td>
-                        {finScenarios.map((s) => <td key={`ro-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPct)}</td>)}
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>Annual ROI %</td>
+                        {finScenarios.map((s) => <td key={`ro-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPct)}</td>)}
                       </tr>
                       {includeCapitalLessSavedLand && (
                         <>
                           <tr style={{ background: darkThemeActive ? "#1A1714" : "#F7F7F7" }}>
                             <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#E3D7C8" : C.g700, paddingTop: 10 }}>Capital Invest Less Value of Saved Land</td>
-                            {finScenarios.map((s) => <td key={`cl-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, paddingTop: 10 }}>{finFmtInt(finCapitalLessSavedLand)}</td>)}
+                            {finScenarios.map((s) => <td key={`cl-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? C.g700 : C.navy, paddingTop: 10 }}>{finFmtInt(finCapitalLessSavedLand)}</td>)}
                           </tr>
                           <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
-                            <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
-                            {finScenarios.map((s) => <td key={`y2-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakevenLessLand)}</td>)}
+                            <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
+                            {finScenarios.map((s) => <td key={`y2-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakevenLessLand)}</td>)}
                           </tr>
                           <tr style={{ background: darkThemeActive ? "#14100D" : "#FFFFFF" }}>
-                            <td style={{ padding: "6px 8px", color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Annual ROI %</td>
-                            {finScenarios.map((s) => <td key={`r2-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPctLessLand)}</td>)}
+                            <td style={{ padding: "6px 8px", color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>Annual ROI %</td>
+                            {finScenarios.map((s) => <td key={`r2-${s.price}`} style={{ ...finProposalCell, color: darkThemeActive ? C.g700 : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPctLessLand)}</td>)}
                           </tr>
                         </>
                       )}
@@ -5436,8 +5350,8 @@ export default function JantaProposal({
                 </div>
             )}
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setStep(2)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back</button>
-              <button onClick={() => setStep(4)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Continue to Shadow Analysis →</button>
+              <button onClick={() => setStep(2)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E5E7EB" : C.white, color: darkThemeActive ? "#111111" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back</button>
+              <button onClick={() => setStep(4)} style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E5E7EB" : C.navy, color: darkThemeActive ? "#111111" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}>Continue to Shadow Analysis →</button>
             </div>
           </div>
         )}
@@ -5482,7 +5396,7 @@ export default function JantaProposal({
               </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setStep(3)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back</button>
+              <button onClick={() => setStep(3)} style={{ flex: 1, padding: "12px 0", background: darkThemeActive ? "#E5E7EB" : C.white, color: darkThemeActive ? "#111111" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Back</button>
               <button
                 onClick={() => {
                   if (!siteMapMeetsTowerRequirement(siteMap, effectiveSizeProject)) {
@@ -5496,7 +5410,7 @@ export default function JantaProposal({
                   }
                   setStep(5);
                 }}
-                style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.navy, color: darkThemeActive ? "#1B140D" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}
+                style={{ flex: 2, padding: "12px 0", background: darkThemeActive ? "#E5E7EB" : C.navy, color: darkThemeActive ? "#111111" : "#F8F2E8", border: darkThemeActive ? `1px solid ${C.g300}` : "none", borderRadius: 8, cursor: "pointer", fontSize: 14, fontWeight: 600, fontFamily: fontSans }}
               >
                 Generate Proposal →
               </button>
@@ -5582,7 +5496,7 @@ export default function JantaProposal({
             <div ref={proposalPdfRef} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {(() => {
               const coverBlock = (
-                <div style={{ background: C.navy, borderRadius: 10, padding: coverPad, color: proposalScreenDark ? "#F8F2E8" : C.white }}>
+                <div style={{ background: C.navy, borderRadius: 10, padding: coverPad, color: proposalScreenDark ? C.g700 : C.white }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                     <div>
                       <div style={{ height: 50, marginBottom: 6, paddingLeft: 0, paddingTop: 0, overflow: "hidden" }}>
@@ -5600,7 +5514,7 @@ export default function JantaProposal({
                           }}
                         />
                       </div>
-                      <h2 style={{ margin: "0 0 4px 0", fontSize: PT.coverTitle, fontWeight: 700, fontFamily: fontSans, color: proposalScreenDark ? "#F8F2E8" : undefined, lineHeight: 1.25 }}>{(proposalTitle || custAddress || "Solar").trim()} Proposal</h2>
+                      <h2 style={{ margin: "0 0 4px 0", fontSize: PT.coverTitle, fontWeight: 700, fontFamily: fontSans, color: proposalScreenDark ? C.g700 : undefined, lineHeight: 1.25 }}>{(proposalTitle || custAddress || "Solar").trim()} Proposal</h2>
                       {multiMeterMode && (
                         <p style={{ margin: "0 0 4px 0", color: C.gold, fontSize: PT.coverMeta, fontFamily: fontSans, fontWeight: 600 }}>
                           {meters.length} meters · {formatSystemWithUnit(effectiveSizeProject, useMwDisplay)} combined
@@ -5610,11 +5524,11 @@ export default function JantaProposal({
                     </div>
                     <div style={{ textAlign: "right", fontSize: PT.caption, fontFamily: fontSans, lineHeight: 1.45 }}>
                       <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginBottom: 4, fontSize: PT.label, textTransform: "uppercase", letterSpacing: "0.04em" }}>Prepared For</div>
-                      <div style={{ fontWeight: 600, fontSize: PT.bodySm, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{custName || "—"}</div>
+                      <div style={{ fontWeight: 600, fontSize: PT.bodySm, color: proposalScreenDark ? C.g700 : undefined }}>{custName || "—"}</div>
                       <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custEmail}</div>
                       <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{custPhone}</div>
                       <div style={{ color: proposalScreenDark ? "#C3B39F" : "rgba(255,255,255,0.45)", marginTop: 10, marginBottom: 4, fontSize: PT.label, textTransform: "uppercase", letterSpacing: "0.04em" }}>Prepared By</div>
-                      <div style={{ fontWeight: 600, fontSize: PT.bodySm, color: proposalScreenDark ? "#F8F2E8" : undefined }}>{prepBy}</div>
+                      <div style={{ fontWeight: 600, fontSize: PT.bodySm, color: proposalScreenDark ? C.g700 : undefined }}>{prepBy}</div>
                       <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepEmail}</div>
                       <div style={{ color: proposalScreenDark ? "#D9CDBF" : "rgba(255,255,255,0.6)" }}>{prepPhone}</div>
                     </div>
@@ -5889,20 +5803,20 @@ export default function JantaProposal({
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: PT.table, fontFamily: fontSans, minWidth: compactSecondPageBundle ? 680 : 760 }}>
                     <thead>
                       <tr style={{ background: proposalScreenDark ? "#211A14" : "#F1F5FB" }}>
-                        <th style={{ textAlign: "left", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontSize: PT.tableHead }}>Value of Energy Produced ($/MWh)</th>
+                        <th style={{ textAlign: "left", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700, fontSize: PT.tableHead }}>Value of Energy Produced ($/MWh)</th>
                         {finScenarios.map((s) => (
-                          <th key={`ph-${s.price}`} style={{ textAlign: "right", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700, fontSize: PT.tableHead }}>{s.price.toFixed(1)}</th>
+                          <th key={`ph-${s.price}`} style={{ textAlign: "right", padding: "7px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700, fontSize: PT.tableHead }}>{s.price.toFixed(1)}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
                       <tr style={{ background: proposalScreenDark ? "#18120E" : "#F9FBFF" }}>
                         <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#E3D7C8" : C.g700 }}>Annual Revenue</td>
-                        {finScenarios.map((s) => <td key={`par-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy }}>{finFmtInt(s.annualRevenue)}</td>)}
+                        {finScenarios.map((s) => <td key={`par-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? C.g700 : C.navy }}>{finFmtInt(s.annualRevenue)}</td>)}
                       </tr>
                       <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
                         <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#E3D7C8" : C.g700 }}>Annual Maintenance Costs</td>
-                        {finScenarios.map((s) => <td key={`pam-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy }}>{finFmtInt(finAnnualMaintenance)}</td>)}
+                        {finScenarios.map((s) => <td key={`pam-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? C.g700 : C.navy }}>{finFmtInt(finAnnualMaintenance)}</td>)}
                       </tr>
                       <tr style={{ background: proposalScreenDark ? "#1A271F" : "#EEF7EE" }}>
                         <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#D9F2E3" : C.navy, fontWeight: 700 }}>Annual Profit</td>
@@ -5914,29 +5828,29 @@ export default function JantaProposal({
                       </tr>
                       <tr style={{ background: proposalScreenDark ? "#1A1714" : "#F7F7F7" }}>
                         <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#E3D7C8" : C.g700, paddingTop: 10 }}>Developer Capital Investment</td>
-                        {finScenarios.map((s) => <td key={`pdc-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, paddingTop: 10 }}>{finFmtInt(finDeveloperCapitalCost)}</td>)}
+                        {finScenarios.map((s) => <td key={`pdc-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? C.g700 : C.navy, paddingTop: 10 }}>{finFmtInt(finDeveloperCapitalCost)}</td>)}
                       </tr>
                       <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
-                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
-                        {finScenarios.map((s) => <td key={`pyb-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakeven)}</td>)}
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
+                        {finScenarios.map((s) => <td key={`pyb-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakeven)}</td>)}
                       </tr>
                       <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
-                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Annual ROI %</td>
-                        {finScenarios.map((s) => <td key={`pro-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPct)}</td>)}
+                        <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700 }}>Annual ROI %</td>
+                        {finScenarios.map((s) => <td key={`pro-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPct)}</td>)}
                       </tr>
                       {includeCapitalLessSavedLand && (
                         <>
                           <tr style={{ background: proposalScreenDark ? "#1A1714" : "#F7F7F7" }}>
                             <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#E3D7C8" : C.g700, paddingTop: 10 }}>Capital Invest Less Value of Saved Land</td>
-                            {finScenarios.map((s) => <td key={`pcl-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, paddingTop: 10 }}>{finFmtInt(finCapitalLessSavedLand)}</td>)}
+                            {finScenarios.map((s) => <td key={`pcl-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? C.g700 : C.navy, paddingTop: 10 }}>{finFmtInt(finCapitalLessSavedLand)}</td>)}
                           </tr>
                           <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
-                            <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
-                            {finScenarios.map((s) => <td key={`py2-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakevenLessLand)}</td>)}
+                            <td style={{ padding: "6px 8px", borderBottom: `1px solid ${C.g200}`, color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700 }}>Years to Breakeven</td>
+                            {finScenarios.map((s) => <td key={`py2-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700 }}>{finFmtYears(s.yearsToBreakevenLessLand)}</td>)}
                           </tr>
                           <tr style={{ background: proposalScreenDark ? "#14100D" : "#FFFFFF" }}>
-                            <td style={{ padding: "6px 8px", color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>Annual ROI %</td>
-                            {finScenarios.map((s) => <td key={`pr2-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? "#F8F2E8" : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPctLessLand)}</td>)}
+                            <td style={{ padding: "6px 8px", color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700 }}>Annual ROI %</td>
+                            {finScenarios.map((s) => <td key={`pr2-${s.price}`} style={{ ...finProposalCell, color: proposalScreenDark ? C.g700 : C.navy, fontWeight: 700 }}>{finFmtPct(s.annualRoiPctLessLand)}</td>)}
                           </tr>
                         </>
                       )}
@@ -5972,7 +5886,7 @@ export default function JantaProposal({
                 </p>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 28 }}>
                   <div>
-                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: PT.body, fontWeight: 700, marginBottom: 6, fontFamily: fontSans }}>Signature:</div>
+                    <div style={{ color: proposalScreenDark ? C.g700 : C.navy, fontSize: PT.body, fontWeight: 700, marginBottom: 6, fontFamily: fontSans }}>Signature:</div>
                     <div style={{ borderBottom: `1px solid ${C.g300}`, height: 36, marginBottom: 8, display: "flex", alignItems: "flex-end" }}>
                       <img
                         src={jantaPublicAssetUrl("/assets/adam-boudissa-signature-new.png")}
@@ -5993,9 +5907,9 @@ export default function JantaProposal({
                     <div style={{ fontSize: PT.body, fontFamily: fontSans, color: C.g700 }}>Adam Boudissa, Finance Officer</div>
                   </div>
                   <div>
-                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: PT.body, fontWeight: 700, marginBottom: 6, fontFamily: fontSans }}>Signature:</div>
+                    <div style={{ color: proposalScreenDark ? C.g700 : C.navy, fontSize: PT.body, fontWeight: 700, marginBottom: 6, fontFamily: fontSans }}>Signature:</div>
                     <div style={{ borderBottom: `1px solid ${C.g300}`, height: 36, marginBottom: 8 }} />
-                    <div style={{ color: proposalScreenDark ? "#F8F2E8" : C.navy, fontSize: PT.body, fontWeight: 700, marginBottom: 6, fontFamily: fontSans }}>Printed Name:</div>
+                    <div style={{ color: proposalScreenDark ? C.g700 : C.navy, fontSize: PT.body, fontWeight: 700, marginBottom: 6, fontFamily: fontSans }}>Printed Name:</div>
                     <div style={{ borderBottom: `1px solid ${C.g300}`, height: 36 }} />
                   </div>
                 </div>
@@ -6047,7 +5961,7 @@ export default function JantaProposal({
               >
                 {pdfExporting ? "Preparing PDF…" : "Download proposal as PDF"}
               </button>
-              <button onClick={() => setStep(0)} style={{ padding: "12px 0", background: darkThemeActive ? "#E3D2B8" : C.white, color: darkThemeActive ? "#1B140D" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Start New Proposal</button>
+              <button onClick={() => setStep(0)} style={{ padding: "12px 0", background: darkThemeActive ? "#E5E7EB" : C.white, color: darkThemeActive ? "#111111" : C.navy, border: `1px solid ${C.g200}`, borderRadius: 8, cursor: "pointer", fontSize: 13, fontFamily: fontSans }}>← Start New Proposal</button>
             </div>
           </div>
         )}

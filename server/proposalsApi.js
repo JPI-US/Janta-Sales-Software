@@ -1,4 +1,4 @@
-import fs from "fs";
+﻿import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import "./loadEnv.js";
@@ -8,6 +8,7 @@ import {
   syncAccountWithHubSpot,
 } from "./hubspot.js";
 import { dedupeProposalList } from "../shared/proposalDedupe.js";
+import { applyCrmDefaults, pickCrmFieldsFromBody } from "../shared/proposalCrmFields.js";
 import { proposalStorageKey } from "../shared/proposalAccount.js";
 import { readJson, writeJson, readBody, send } from "./httpUtils.js";
 import { authenticateRequest } from "./auth/sessions.js";
@@ -47,29 +48,15 @@ function loadProposalsStore(dataDir, userId) {
   return deduped;
 }
 
-function upsertProposalRow(proposals, { userId, id, title, snapshot, status, existingIdx }) {
+function upsertProposalRow(proposals, { userId, id, title, snapshot, status, crmFields = {}, existingIdx }) {
   const now = new Date().toISOString();
   const cleanTitle = String(title || "").trim() || "Untitled proposal";
   if (existingIdx >= 0) {
-    const next = {
-      ...proposals[existingIdx],
-      title: cleanTitle,
-      snapshot,
-      status: status ?? proposals[existingIdx].status ?? "in_progress",
-      updatedAt: now,
-    };
+    const next = applyCrmDefaults({ ...proposals[existingIdx], title: cleanTitle, snapshot, status: status ?? proposals[existingIdx].status ?? "in_progress", ...crmFields, updatedAt: now });
     proposals[existingIdx] = next;
     return { proposal: next, created: false };
   }
-  const created = {
-    id: id || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    userId,
-    title: cleanTitle,
-    status: status || "in_progress",
-    snapshot,
-    createdAt: now,
-    updatedAt: now,
-  };
+  const created = applyCrmDefaults({ id: id || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, userId, title: cleanTitle, status: status || "in_progress", snapshot, ...crmFields, createdAt: now, updatedAt: now });
   proposals.push(created);
   return { proposal: created, created: true };
 }
@@ -148,14 +135,7 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR, authData
           const proposals = loadProposalsStore(dataDir, userId);
           const requestedId = body.id ? String(body.id).trim() : "";
           const idx = requestedId ? proposals.findIndex((p) => p.id === requestedId) : -1;
-          const { proposal, created } = upsertProposalRow(proposals, {
-            userId,
-            id: requestedId || undefined,
-            title: body.title,
-            snapshot: body.snapshot,
-            status: body.status,
-            existingIdx: idx,
-          });
+          const { proposal, created } = upsertProposalRow(proposals, { userId, id: requestedId || undefined, title: body.title, snapshot: body.snapshot, status: body.status, crmFields: pickCrmFieldsFromBody(body), existingIdx: idx });
           const userEmail = String(body.userEmail || "").trim();
           await hubspotPushAfterSave(proposal, userEmail);
           writeJson(proposalsPath(dataDir, userId), { proposals });
@@ -166,8 +146,7 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR, authData
           let rows = loadProposalsStore(dataDir, userId);
           const status = url.searchParams.get("status");
           if (status) rows = rows.filter((p) => p.status === status);
-          rows.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-          return send(res, 200, { proposals: rows });
+          rows.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)); return send(res, 200, { proposals: rows.map(applyCrmDefaults) });
         }
       }
 
@@ -204,7 +183,7 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR, authData
         if (req.method === "GET") {
           const row = proposals.find((p) => p.id === proposalId);
           if (!row) return send(res, 404, { error: "Not found" });
-          return send(res, 200, { proposal: row });
+          return send(res, 200, { proposal: applyCrmDefaults(row) });
         }
 
         if (req.method === "PUT") {
@@ -212,13 +191,7 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR, authData
           const idx = proposals.findIndex((p) => p.id === proposalId);
           if (idx < 0) return send(res, 404, { error: "Not found" });
           const now = new Date().toISOString();
-          const next = {
-            ...proposals[idx],
-            ...(body?.title != null ? { title: String(body.title).trim() || proposals[idx].title } : {}),
-            ...(body?.snapshot != null ? { snapshot: body.snapshot } : {}),
-            ...(body?.status != null ? { status: body.status } : {}),
-            updatedAt: now,
-          };
+          const next = applyCrmDefaults({ ...proposals[idx], ...(body?.title != null ? { title: String(body.title).trim() || proposals[idx].title } : {}), ...(body?.snapshot != null ? { snapshot: body.snapshot } : {}), ...(body?.status != null ? { status: body.status } : {}), ...pickCrmFieldsFromBody(body), updatedAt: now });
           proposals[idx] = next;
           const userEmail = String(body?.userEmail || "").trim();
           await hubspotPushAfterSave(next, userEmail);
@@ -251,3 +224,6 @@ export function createProposalsApiMiddleware(options) {
     });
   };
 }
+
+
+
