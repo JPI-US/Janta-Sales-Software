@@ -1204,7 +1204,7 @@ function RevenueForecastPanel({ isDark, series, summary, xDomain }) {
   const t = useTheme(isDark);
   const type = reportTypography(t);
   const trendLegend = {
-    label: "Close-size trend",
+    label: "Close activity trend",
     color: forecastTrendColor(isDark),
   };
 

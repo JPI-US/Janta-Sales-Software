@@ -2,10 +2,12 @@
 import JantaProposal from "../janta-proposal-generator-v3 (1).jsx";
 import ProposalsLibrary from "./ProposalsLibrary.jsx";
 import ReportsDashboard from "./ReportsDashboard.jsx";
-import MediaDashboard from "./MediaDashboard.jsx";
 import EmailCampaignsPage from "./EmailCampaignsPage.jsx";
+import SocialCampaignsPage from "./SocialCampaignsPage.jsx";
+import MarketingReportPage from "./MarketingReportPage.jsx";
 const EmailStudioPage = React.lazy(() => import("./EmailStudioPage.jsx"));
 import SettingsPage from "./SettingsPage.jsx";
+import CalendarPage from "./CalendarPage.jsx";
 import AppShell from "./AppShell.jsx";
 import { getProposalForUser } from "./proposalStorage.js";
 import { SNAPSHOT_VERSION } from "./proposalSnapshot.js";
@@ -27,6 +29,34 @@ import { isProposalPinned, togglePinnedProposal } from "./pinnedProposals.js";
 import { assignProposalToFolder } from "./proposalFolders.js";
 
 const NAV_SESSION_PREFIX = "janta_app_nav_v1_";
+const APP_VIEWS = new Set([
+  "library",
+  "editor",
+  "reports",
+  "media",
+  "campaigns",
+  "email",
+  "calendar",
+  "social",
+  "emailAnalytics",
+  "socialAnalytics",
+  "website",
+]);
+
+const MARKETING_SECTIONS = new Set(["overview", "email", "social", "website"]);
+
+function marketingSectionFromView(view, section) {
+  if (MARKETING_SECTIONS.has(section)) return section;
+  if (view === "socialAnalytics") return "social";
+  if (view === "website") return "website";
+  if (view === "emailAnalytics") return "email";
+  return "overview";
+}
+
+function canonicalView(view) {
+  if (view === "emailAnalytics" || view === "socialAnalytics" || view === "website") return "media";
+  return view;
+}
 
 function emptyEditorSnapshot() {
   return {
@@ -45,8 +75,12 @@ function readNavState(userId) {
     const raw = sessionStorage.getItem(`${NAV_SESSION_PREFIX}${userId}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (parsed?.view !== "library" && parsed?.view !== "editor" && parsed?.view !== "reports" && parsed?.view !== "media" && parsed?.view !== "campaigns" && parsed?.view !== "email") return null;
-    return parsed;
+    if (!APP_VIEWS.has(parsed?.view)) return null;
+    return {
+      ...parsed,
+      view: canonicalView(parsed.view),
+      marketingSection: marketingSectionFromView(parsed.view, parsed.marketingSection),
+    };
   } catch {
     return null;
   }
@@ -86,6 +120,7 @@ export default function ProposalApp({
   const [pendingEmailCreate, setPendingEmailCreate] = useState(false);
   const [pendingProjectFolderId, setPendingProjectFolderId] = useState(null);
   const [pendingEmailFolderId, setPendingEmailFolderId] = useState(null);
+  const [marketingSection, setMarketingSection] = useState(() => savedNav?.marketingSection || "overview");
   const [autoDownloadPdf, setAutoDownloadPdf] = useState(false);
   const [restoring, setRestoring] = useState(Boolean(savedNav?.view === "editor" && savedNav?.proposalId));
   const restoreStarted = useRef(false);
@@ -114,11 +149,12 @@ export default function ProposalApp({
   }, [view]);
 
   const persistNav = useCallback(
-    (nextView, proposal = activeProposal) => {
+    (nextView, proposal = activeProposal, extra = {}) => {
       writeNavState(accountKey, {
         view: nextView,
         proposalId: proposal?.id || null,
         proposalTitle: proposal?.title || "",
+        ...extra,
       });
     },
     [accountKey, activeProposal]
@@ -187,18 +223,35 @@ export default function ProposalApp({
     persistNav("campaigns", { id: null, title: "", snapshot: null });
   }, [runBeforeNavigate, persistNav]);
 
-  const openMedia = useCallback(async () => {
-    if (!isAdmin) return;
+  const openMedia = useCallback(
+    async (section = "overview") => {
+      if (!isAdmin) return;
+      if (!(await runBeforeNavigate())) return;
+      const nextSection = typeof section === "string" && MARKETING_SECTIONS.has(section) ? section : "overview";
+      setMarketingSection(nextSection);
+      setView("media");
+      persistNav("media", { id: null, title: "", snapshot: null }, { marketingSection: nextSection });
+    },
+    [isAdmin, runBeforeNavigate, persistNav],
+  );
+
+  const openCalendar = useCallback(async () => {
     if (!(await runBeforeNavigate())) return;
-    setView("media");
-    persistNav("media", { id: null, title: "", snapshot: null });
-  }, [isAdmin, runBeforeNavigate, persistNav]);
+    setView("calendar");
+    persistNav("calendar", { id: null, title: "", snapshot: null });
+  }, [runBeforeNavigate, persistNav]);
 
   const openEmailStudio = useCallback(async () => {
     if (!(await runBeforeNavigate())) return;
     setActiveEmailTemplateId(null);
     setView("email");
     persistNav("email", { id: null, title: "", snapshot: null });
+  }, [runBeforeNavigate, persistNav]);
+
+  const openSocial = useCallback(async () => {
+    if (!(await runBeforeNavigate())) return;
+    setView("social");
+    persistNav("social", { id: null, title: "", snapshot: null });
   }, [runBeforeNavigate, persistNav]);
 
   const requestNewProject = useCallback(async () => {
@@ -468,6 +521,42 @@ export default function ProposalApp({
         onUserUpdate={onUserUpdate}
       />
     );
+  } else if (view === "calendar") {
+    page = (
+      <CalendarPage
+        isDark={appDarkMode}
+        userName={currentUser.name}
+        userEmail={currentUser.email}
+        accountKey={accountKey}
+        onBack={openLibrary}
+      />
+    );
+  } else if (view === "social") {
+    page = (
+      <SocialCampaignsPage
+        isDark={appDarkMode}
+        userName={currentUser.name}
+        userEmail={currentUser.email}
+        onBack={openLibrary}
+        onOpenAnalytics={isAdmin ? () => openMedia("social") : undefined}
+      />
+    );
+  } else if (view === "media" && isAdmin) {
+    page = (
+      <MarketingReportPage
+        isDark={appDarkMode}
+        userName={currentUser.name}
+        userEmail={currentUser.email}
+        onBack={openLibrary}
+        onOpenEmailStudio={openEmailStudio}
+        section={marketingSection}
+        onSectionChange={(next) => {
+          const nextSection = MARKETING_SECTIONS.has(next) ? next : "overview";
+          setMarketingSection(nextSection);
+          persistNav("media", { id: null, title: "", snapshot: null }, { marketingSection: nextSection });
+        }}
+      />
+    );
   } else if (view === "reports" && isAdmin) {
     page = (
       <ReportsDashboard
@@ -487,16 +576,6 @@ export default function ProposalApp({
         onBack={openLibrary}
         onOpenEmailStudio={openEmailStudio}
         onOpenEmailTemplate={openEmailTemplate}
-      />
-    );
-  } else if (view === "media" && isAdmin) {
-    page = (
-      <MediaDashboard
-        isDark={appDarkMode}
-        userName={currentUser.name}
-        userEmail={currentUser.email}
-        onBack={openLibrary}
-        onOpenEmailStudio={openEmailStudio}
       />
     );
   } else if (view === "email") {
@@ -594,7 +673,9 @@ export default function ProposalApp({
       onNavigateReports={openReports}
       onNavigateMedia={openMedia}
       onNavigateCampaigns={openCampaigns}
+      onNavigateCalendar={openCalendar}
       onNavigateEmail={openEmailStudio}
+      onNavigateSocial={openSocial}
       onNewProject={requestNewProject}
       onNewEmail={requestNewEmail}
       onNewProjectInFolder={requestNewProjectInFolder}

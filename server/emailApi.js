@@ -4,6 +4,7 @@ import { proposalStorageKey } from "../shared/proposalAccount.js";
 import { readJson, writeJson, readBody, send } from "./httpUtils.js";
 import { authenticateRequest } from "./auth/sessions.js";
 import { DEFAULT_DATA_DIR } from "./proposalsApi.js";
+import { normalizeCampaignPosts } from "../shared/campaignPosting.js";
 
 function userDir(dataDir, userId) {
   const safe = String(userId).replace(/[^a-zA-Z0-9_-]/g, "");
@@ -160,6 +161,7 @@ function normalizeAutomation(body = {}, existing = null) {
       ? body.status
       : existing?.status || "draft",
     schedule,
+    posts: normalizeCampaignPosts(body.posts ?? existing?.posts),
     sender: {
       name: String(body.sender?.name ?? existing?.sender?.name ?? "").slice(0, 120),
       title: String(body.sender?.title ?? existing?.sender?.title ?? "").slice(0, 120),

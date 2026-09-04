@@ -171,7 +171,9 @@ export default function AppSidebar({
   onNavigateReports,
   onNavigateMedia,
   onNavigateCampaigns,
+  onNavigateCalendar,
   onNavigateEmail,
+  onNavigateSocial,
   onNewProject,
   onNewEmail,
   onNewProjectInFolder,
@@ -303,7 +305,19 @@ export default function AppSidebar({
           flexShrink: 0,
         }}
       >
-        <SidebarNavSection sidebar={sidebar} expanded={expanded} label="Sales">
+        <SidebarNavSection sidebar={sidebar} expanded={expanded} label="Calendar">
+          <SidebarNavButton
+            theme={sidebar}
+            expanded={expanded}
+            active={currentView === "calendar"}
+            icon="calendar"
+            label="Calendar"
+            onClick={onNavigateCalendar}
+            onContextMenu={(e) => showMenu(e, [{ label: "Open calendar", action: onNavigateCalendar }])}
+          />
+        </SidebarNavSection>
+
+        <SidebarNavSection sidebar={sidebar} expanded={expanded} label="Sales" showDivider>
           <SidebarNavButton
             theme={sidebar}
             expanded={expanded}
@@ -329,9 +343,9 @@ export default function AppSidebar({
               expanded={expanded}
               active={currentView === "reports"}
               icon="chart"
-              label="Reports"
+              label="Sales Report"
               onClick={onNavigateReports}
-              onContextMenu={(e) => showMenu(e, [{ label: "Open reports", action: onNavigateReports }])}
+              onContextMenu={(e) => showMenu(e, [{ label: "Open sales report", action: onNavigateReports }])}
             />
           ) : null}
         </SidebarNavSection>
@@ -366,15 +380,24 @@ export default function AppSidebar({
             onClick={onNavigateCampaigns}
             onContextMenu={(e) => showMenu(e, [{ label: "Open email campaigns", action: onNavigateCampaigns }])}
           />
+          <SidebarNavButton
+            theme={sidebar}
+            expanded={expanded}
+            active={currentView === "social"}
+            icon="megaphone"
+            label="Social Campaigns"
+            onClick={onNavigateSocial}
+            onContextMenu={(e) => showMenu(e, [{ label: "Open social campaigns", action: onNavigateSocial }])}
+          />
           {isAdmin ? (
             <SidebarNavButton
               theme={sidebar}
               expanded={expanded}
               active={currentView === "media"}
               icon="chart"
-              label="Marketing Analytics"
+              label="Marketing Report"
               onClick={onNavigateMedia}
-              onContextMenu={(e) => showMenu(e, [{ label: "Open marketing analytics", action: onNavigateMedia }])}
+              onContextMenu={(e) => showMenu(e, [{ label: "Open marketing report", action: onNavigateMedia }])}
             />
           ) : null}
         </SidebarNavSection>

@@ -14,7 +14,9 @@ export default function AppShell({
   onNavigateReports,
   onNavigateMedia,
   onNavigateCampaigns,
+  onNavigateCalendar,
   onNavigateEmail,
+  onNavigateSocial,
   onNewProject,
   onNewEmail,
   onNewProjectInFolder,
@@ -52,7 +54,9 @@ export default function AppShell({
         onNavigateReports={onNavigateReports}
         onNavigateMedia={onNavigateMedia}
         onNavigateCampaigns={onNavigateCampaigns}
+        onNavigateCalendar={onNavigateCalendar}
         onNavigateEmail={onNavigateEmail}
+        onNavigateSocial={onNavigateSocial}
         onNewProject={onNewProject}
         onNewEmail={onNewEmail}
         onNewProjectInFolder={onNewProjectInFolder}

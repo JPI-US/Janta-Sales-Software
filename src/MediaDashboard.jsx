@@ -13,11 +13,27 @@ import {
   formatMediaPercent,
 } from "../shared/mediaMetrics.js";
 
-const PERIOD_OPTIONS = [
+const ROLLING_PERIOD_OPTIONS = [
   { days: 30, label: "30 days" },
   { days: 60, label: "60 days" },
   { days: 90, label: "90 days" },
 ];
+
+function calendarQuarterIndex(d = new Date()) {
+  return d.getFullYear() * 4 + Math.floor(d.getMonth() / 3);
+}
+
+function calendarQuarterRange(index) {
+  const year = Math.floor(index / 4);
+  const q = ((index % 4) + 4) % 4;
+  const start = new Date(year, q * 3, 1, 0, 0, 0, 0);
+  const end = new Date(year, q * 3 + 3, 0, 23, 59, 59, 999);
+  return {
+    from: start.toISOString(),
+    to: end.toISOString(),
+    label: `Q${q + 1} ${year}`,
+  };
+}
 
 function useTheme(isDark) {
   return useMemo(() => getAppTheme(isDark), [isDark]);
@@ -235,12 +251,13 @@ function ChannelPanel({ channel, isDark }) {
   );
 }
 
-function PeriodChip({ label, active, isDark, onClick }) {
+function PeriodChip({ label, active, isDark, onClick, disabled }) {
   const t = useTheme(isDark);
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       style={{
         padding: "6px 12px",
         borderRadius: 999,
@@ -249,7 +266,8 @@ function PeriodChip({ label, active, isDark, onClick }) {
         color: active ? t.title : t.subtle,
         fontSize: 12,
         fontWeight: active ? 700 : 500,
-        cursor: "pointer",
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.45 : 1,
         fontFamily: fontSans,
       }}
     >
@@ -258,19 +276,41 @@ function PeriodChip({ label, active, isDark, onClick }) {
   );
 }
 
-export default function MediaDashboard({ isDark, userName, userEmail, onBack, onOpenEmailStudio }) {
+export default function MediaDashboard({
+  isDark,
+  userName,
+  userEmail,
+  onBack,
+  onOpenEmailStudio,
+  title = "Marketing Report",
+  channelKeys = MEDIA_CHANNEL_ORDER,
+  showSummary = true,
+  periodMode = "quarter",
+  sectionTabs,
+  activeSection,
+  onSectionChange,
+  headerExtra,
+  summaryExtras,
+  children,
+}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [overview, setOverview] = useState(null);
-  const [days, setDays] = useState(30);
+  const [days, setDays] = useState(90);
+  const [quarterIndex, setQuarterIndex] = useState(() => calendarQuarterIndex());
   const t = useTheme(isDark);
   const type = mediaTypography(t);
+  const currentQuarter = calendarQuarterIndex();
+  const selectedQuarter = calendarQuarterRange(quarterIndex);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const data = await fetchMediaOverview({ days });
+      const data =
+        periodMode === "quarter"
+          ? await fetchMediaOverview({ from: selectedQuarter.from, to: selectedQuarter.to })
+          : await fetchMediaOverview({ days });
       setOverview(data);
     } catch (err) {
       setError(err.message || "Could not load marketing analytics");
@@ -278,7 +318,7 @@ export default function MediaDashboard({ isDark, userName, userEmail, onBack, on
     } finally {
       setLoading(false);
     }
-  }, [days]);
+  }, [days, periodMode, selectedQuarter.from, selectedQuarter.to]);
 
   useEffect(() => {
     load();
@@ -291,21 +331,54 @@ export default function MediaDashboard({ isDark, userName, userEmail, onBack, on
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", background: t.bg, color: t.title }}>
       <PageHeader
         theme={t}
-        title="Marketing Analytics"
+        title={title}
         subtitle={[userName, userEmail].filter(Boolean).join(" · ")}
         onBack={onBack}
         backTitle="Back to Projects"
       >
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-          {PERIOD_OPTIONS.map((opt) => (
-            <PeriodChip
-              key={opt.days}
-              label={opt.label}
-              active={days === opt.days}
-              isDark={isDark}
-              onClick={() => setDays(opt.days)}
-            />
-          ))}
+          {Array.isArray(sectionTabs) && sectionTabs.length
+            ? sectionTabs.map((tab) => (
+                <PeriodChip
+                  key={tab.id}
+                  label={tab.label}
+                  active={activeSection === tab.id}
+                  isDark={isDark}
+                  onClick={() => onSectionChange?.(tab.id)}
+                />
+              ))
+            : null}
+          {periodMode === "quarter" ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <PeriodChip
+                label="Prev"
+                active={false}
+                isDark={isDark}
+                onClick={() => setQuarterIndex((i) => i - 1)}
+              />
+              <span style={{ ...type.body, fontWeight: 600, color: t.title, padding: "0 4px" }}>
+                {selectedQuarter.label}
+              </span>
+              <PeriodChip
+                label="Next"
+                active={false}
+                isDark={isDark}
+                disabled={quarterIndex >= currentQuarter}
+                onClick={() => setQuarterIndex((i) => Math.min(currentQuarter, i + 1))}
+              />
+            </div>
+          ) : (
+            ROLLING_PERIOD_OPTIONS.map((opt) => (
+              <PeriodChip
+                key={opt.days}
+                label={opt.label}
+                active={days === opt.days}
+                isDark={isDark}
+                onClick={() => setDays(opt.days)}
+              />
+            ))
+          )}
+          {headerExtra}
           <RibbonLabeledButton theme={t} icon="link" label="Refresh" onClick={load} disabled={loading} />
           {typeof onOpenEmailStudio === "function" ? (
             <RibbonLabeledButton theme={t} icon="mail" label="Email Studio" onClick={onOpenEmailStudio} />
@@ -315,7 +388,7 @@ export default function MediaDashboard({ isDark, userName, userEmail, onBack, on
 
       <main style={{ ...pageShellStyle(), flex: 1, overflow: "auto" }}>
         {loading ? (
-          <div style={{ ...type.body, color: t.subtle, padding: "48px 0", textAlign: "center" }}>Loading marketing analytics…</div>
+          <div style={{ ...type.body, color: t.subtle, padding: "48px 0", textAlign: "center" }}>Loading {title.toLowerCase()}…</div>
         ) : error ? (
           <div style={{ ...type.body, color: t.lost || "#B42318", padding: "24px 0" }}>{error}</div>
         ) : overview ? (
@@ -336,12 +409,21 @@ export default function MediaDashboard({ isDark, userName, userEmail, onBack, on
               </div>
             ) : null}
 
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+            {showSummary ? (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 20, alignItems: "stretch" }}>
               <StatPill isDark={isDark} label="Total reach" value={formatMediaNumber(summary?.totalReach)} accent="#8FB0C8" />
               <StatPill isDark={isDark} label="Total clicks / sessions" value={formatMediaNumber(summary?.totalClicks)} accent="#2A9D8F" />
               <StatPill isDark={isDark} label="Website sessions" value={formatMediaNumber(summary?.totalSessions)} accent="#2A9D8F" />
               <StatPill isDark={isDark} label="Social engagement" value={formatMediaNumber(summary?.totalEngagement)} accent="#C13584" />
+              <StatPill
+                isDark={isDark}
+                label="Booked meetings"
+                value={formatMediaNumber(summary?.totalMeetings ?? overview?.meetings?.total)}
+                accent="#2A9D8F"
+              />
+              {summaryExtras || null}
             </div>
+            ) : null}
 
             <div
               style={{
@@ -350,13 +432,15 @@ export default function MediaDashboard({ isDark, userName, userEmail, onBack, on
                 gap: 16,
               }}
             >
-              {MEDIA_CHANNEL_ORDER.map((key) => (
-                <ChannelPanel key={key} channel={channels[key]} isDark={isDark} />
+              {(channelKeys || MEDIA_CHANNEL_ORDER).map((key) => (
+                channels[key] ? <ChannelPanel key={key} channel={channels[key]} isDark={isDark} /> : null
               ))}
             </div>
 
+            {children ? <div style={{ marginTop: 20 }}>{children}</div> : null}
+
             <p style={{ ...type.body, color: t.subtle, marginTop: 20, fontSize: 12 }}>
-              Period: {overview.period?.label || `Last ${days} days`}
+              Period: {periodMode === "quarter" ? selectedQuarter.label : overview.period?.label || `Last ${days} days`}
             </p>
           </>
         ) : null}

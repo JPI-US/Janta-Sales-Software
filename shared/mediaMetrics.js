@@ -20,9 +20,9 @@ export const MEDIA_CHANNEL_META = {
   },
   [MEDIA_CHANNEL_WEBSITE]: {
     key: MEDIA_CHANNEL_WEBSITE,
-    label: "Website",
+    label: "jantaus.com",
     shortLabel: "Website",
-    provider: "Google Analytics",
+    provider: "Google Analytics · jantaus.com",
     accent: "#2A9D8F",
   },
   [MEDIA_CHANNEL_INSTAGRAM]: {
@@ -139,9 +139,9 @@ function demoItems(channelKey) {
       { title: "Texas ITC reminder", metric: "29.1% open", secondary: "198 clicks" },
     ],
     [MEDIA_CHANNEL_WEBSITE]: [
-      { title: "/commercial-solar", metric: "4,820 views", secondary: "2:14 avg time" },
-      { title: "/utility-scale", metric: "3,140 views", secondary: "3:02 avg time" },
-      { title: "/contact", metric: "980 views", secondary: "18% conv. rate" },
+      { title: "jantaus.com/", metric: "4,820 views", secondary: "2:14 avg time" },
+      { title: "jantaus.com/contact", metric: "980 views", secondary: "18% conv. rate" },
+      { title: "Home — More Power. Less Land.", metric: "3,140 views", secondary: "3:02 avg time" },
     ],
     [MEDIA_CHANNEL_INSTAGRAM]: [
       { title: "Tower install timelapse", metric: "12.4K reach", secondary: "842 likes" },

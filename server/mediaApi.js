@@ -4,6 +4,8 @@ import {
   mergeChannelWithDemo,
   summarizeMediaOverview,
 } from "../shared/mediaMetrics.js";
+import { loadMeetingSettings } from "./marketingApi.js";
+import { totalMeetings } from "../shared/meetingBookings.js";
 import { send } from "./httpUtils.js";
 import { authenticateRequest } from "./auth/sessions.js";
 import { fetchEmailChannel } from "./integrations/mediaEmail.js";
@@ -62,11 +64,25 @@ async function buildMediaOverview({ from, to, days, dataDir }) {
 
   const anyLive = MEDIA_CHANNEL_ORDER.some((key) => channels[key]?.live);
   const anyDemo = MEDIA_CHANNEL_ORDER.some((key) => channels[key]?.demo);
+  const meetingSettings = loadMeetingSettings(dataDir);
+  const meetingsByChannel = meetingSettings.meetings || {};
+  const meetingsTotal = totalMeetings(meetingsByChannel);
 
   return {
     period,
     channels,
-    summary: summarizeMediaOverview(channels),
+    summary: {
+      ...summarizeMediaOverview(channels),
+      totalMeetings: meetingsTotal,
+      meetingsByChannel,
+      conversionLabel: "Booked meetings",
+    },
+    meetings: {
+      links: meetingSettings.meetingLinks,
+      byChannel: meetingsByChannel,
+      total: meetingsTotal,
+      recent: meetingSettings.recent || [],
+    },
     anyLive,
     anyDemo,
   };

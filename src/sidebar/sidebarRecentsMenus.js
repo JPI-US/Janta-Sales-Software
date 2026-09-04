@@ -69,6 +69,6 @@ export function buildEmailNavMenuItems({
     },
     { separator: true },
     { label: "Open Email Studio", action: () => onNavigateEmail?.() },
-    ...(isAdmin ? [{ label: "Marketing analytics", action: () => onNavigateMedia?.() }] : []),
+    ...(isAdmin ? [{ label: "Open marketing report", action: () => onNavigateMedia?.("email") }] : []),
   ];
 }

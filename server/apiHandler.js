@@ -3,6 +3,8 @@ import { createProposalsApiHandler, DEFAULT_DATA_DIR } from "./proposalsApi.js";
 import { createReportsApiHandler } from "./reportsApi.js";
 import { createMediaApiHandler } from "./mediaApi.js";
 import { createEmailApiHandler } from "./emailApi.js";
+import { createSocialApiHandler } from "./socialApi.js";
+import { createMarketingApiHandler } from "./marketingApi.js";
 import { DEFAULT_AUTH_DATA_DIR } from "./auth/userStore.js";
 import { send } from "./httpUtils.js";
 
@@ -12,10 +14,16 @@ export function createApiHandler({ dataDir = DEFAULT_DATA_DIR, authDataDir = DEF
   const reportsHandler = createReportsApiHandler({ dataDir, authDataDir });
   const mediaHandler = createMediaApiHandler({ dataDir, authDataDir });
   const emailHandler = createEmailApiHandler({ dataDir, authDataDir });
+  const socialHandler = createSocialApiHandler({ dataDir, authDataDir });
+  const marketingHandler = createMarketingApiHandler({ dataDir, authDataDir });
   return async function apiHandler(req, res, next) {
     await authHandler(req, res, () =>
-      emailHandler(req, res, () =>
-        mediaHandler(req, res, () => reportsHandler(req, res, () => proposalsHandler(req, res, next)))
+      marketingHandler(req, res, () =>
+        socialHandler(req, res, () =>
+          emailHandler(req, res, () =>
+            mediaHandler(req, res, () => reportsHandler(req, res, () => proposalsHandler(req, res, next)))
+          )
+        )
       )
     );
   };

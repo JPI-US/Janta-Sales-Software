@@ -333,29 +333,38 @@ export function LineChartLegend({ series, isDark, trendLine = null }) {
   );
 }
 
-function fitLinearTrend(points, getX, { excludeZero = false } = {}) {
+/** Gaussian-weighted smoother — follows the series shape (trend), not a straight best-fit line. */
+function smoothTrendPoints(points, getX, { bandwidthDays = 10, excludeZero = false } = {}) {
   if (!points?.length) return null;
-  let n = 0;
-  let sumX = 0;
-  let sumY = 0;
-  let sumXY = 0;
-  let sumXX = 0;
-  for (let i = 0; i < points.length; i++) {
-    const y = points[i].value;
-    if (excludeZero && y <= 0) continue;
-    const x = getX(i);
-    n += 1;
-    sumX += x;
-    sumY += y;
-    sumXY += x * y;
-    sumXX += x * x;
+  const n = points.length;
+  const xs = points.map((_, i) => getX(i));
+  const ys = points.map((p) => Number(p.value) || 0);
+  const usable = ys.map((y) => !(excludeZero && y <= 0));
+  if (usable.filter(Boolean).length < 2) return null;
+
+  const span = xs[n - 1] - xs[0];
+  const isTime = span > 86_400_000;
+  const bandwidth = isTime
+    ? Math.max(bandwidthDays, 3) * 86_400_000
+    : Math.max(2.5, Math.round(n * 0.12) || 3);
+
+  const smoothed = [];
+  for (let i = 0; i < n; i++) {
+    let wSum = 0;
+    let ySum = 0;
+    for (let j = 0; j < n; j++) {
+      if (!usable[j]) continue;
+      const d = (xs[j] - xs[i]) / bandwidth;
+      const w = Math.exp(-0.5 * d * d);
+      wSum += w;
+      ySum += w * ys[j];
+    }
+    smoothed.push({
+      ...points[i],
+      value: wSum > 0 ? Math.max(0, ySum / wSum) : 0,
+    });
   }
-  if (n < 2) return null;
-  const denom = n * sumXX - sumX * sumX;
-  if (Math.abs(denom) < 1e-12) return null;
-  const m = (n * sumXY - sumX * sumY) / denom;
-  const b = (sumY - m * sumX) / n;
-  return { m, b };
+  return smoothed;
 }
 
 function forecastTrendColor(isDark) {
@@ -442,18 +451,18 @@ export function LineChart({
     return pad.left + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW);
   }
 
-  const trendFit =
-    showTrendLine &&
-    alignedSeries[0]?.points?.length >= 2
-      ? fitLinearTrend(alignedSeries[0].points, (i) => (useTimeScale ? timestamps[i] : i), {
-          excludeZero: executive,
+  const trendPoints =
+    showTrendLine && alignedSeries[0]?.points?.length >= 2
+      ? smoothTrendPoints(alignedSeries[0].points, (i) => (useTimeScale ? timestamps[i] : i), {
+          bandwidthDays: executive ? 12 : 8,
+          // Keep zeros so empty stretches pull the trend down — reads as activity over time
+          excludeZero: false,
         })
       : null;
-  const trendYAtDomainStart = trendFit ? Math.max(0, trendFit.m * domainMinTime + trendFit.b) : 0;
-  const trendYAtDomainEnd = trendFit ? Math.max(0, trendFit.m * domainMaxTime + trendFit.b) : 0;
+  const trendMax = trendPoints?.length ? Math.max(...trendPoints.map((p) => p.value)) : 0;
 
   const allValues = alignedSeries.flatMap((s) => s.points.map((p) => p.value));
-  const max = Math.max(...allValues, trendYAtDomainStart, trendYAtDomainEnd, 1);
+  const max = Math.max(...allValues, trendMax, 1);
   const min = 0;
 
   function yAt(v) {
@@ -595,16 +604,15 @@ export function LineChart({
             );
           })}
 
-          {trendFit ? (
-            <line
-              x1={xAtTime(domainMinTime)}
-              y1={yAt(trendYAtDomainStart)}
-              x2={xAtTime(domainMaxTime)}
-              y2={yAt(trendYAtDomainEnd)}
+          {trendPoints?.length ? (
+            <path
+              d={pathFor(trendPoints)}
+              fill="none"
               stroke={forecastTrendColor(isDark)}
               strokeWidth={1.75}
               strokeDasharray="4 4"
               strokeLinecap="round"
+              strokeLinejoin="round"
             />
           ) : null}
 
