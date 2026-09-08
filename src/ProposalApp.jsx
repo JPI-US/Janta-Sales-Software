@@ -1,6 +1,7 @@
 ﻿import React, { useCallback, useEffect, useRef, useState } from "react";
 import JantaProposal from "../janta-proposal-generator-v3 (1).jsx";
 import ProposalsLibrary from "./ProposalsLibrary.jsx";
+import IncomingProjects from "./IncomingProjects.jsx";
 import ReportsDashboard from "./ReportsDashboard.jsx";
 import EmailCampaignsPage from "./EmailCampaignsPage.jsx";
 import SocialCampaignsPage from "./SocialCampaignsPage.jsx";
@@ -435,6 +436,52 @@ export default function ProposalApp({
     [accountKey, currentUser.email, runBeforeNavigate, bumpSidebarRefresh]
   );
 
+  const startProposalFromClickUp = useCallback(
+    async (seed) => {
+      if (!seed) return false;
+      if (creatingProposal.current) return false;
+      if (!(await runBeforeNavigate())) return false;
+      creatingProposal.current = true;
+      try {
+        const snapshot = { ...emptyEditorSnapshot(), ...seed };
+        const newId = newProposalId();
+        const saved = await saveProposal({
+          userId: accountKey,
+          id: newId,
+          snapshot,
+          title: deriveProposalTitle(snapshot),
+          userEmail: currentUser.email,
+        });
+        await saveProposalCrmFields({
+          userId: accountKey,
+          id: newId,
+          userEmail: currentUser.email,
+          stage: CRM_STAGE_CREATED,
+          proposalOwner: currentUser.name || currentUser.username || currentUser.email || null,
+        });
+        await clearSessionDraft(accountKey);
+        const next = {
+          id: saved.id,
+          title: saved.title,
+          snapshot: saved.snapshot,
+        };
+        setActiveProposal(next);
+        setEditorKey((k) => k + 1);
+        setView("editor");
+        persistNav("editor", next);
+        setLibraryRefreshKey((k) => k + 1);
+        bumpSidebarRefresh();
+        return true;
+      } catch (err) {
+        window.alert(err.message || "Could not create proposal. Is the cloud API running?");
+        return false;
+      } finally {
+        creatingProposal.current = false;
+      }
+    },
+    [accountKey, currentUser.email, runBeforeNavigate, persistNav, bumpSidebarRefresh]
+  );
+
   const handleAutosave = useCallback(
     async ({ snapshot }) => {
       const { id, title } = activeProposalRef.current;
@@ -615,24 +662,27 @@ export default function ProposalApp({
     );
   } else if (view === "library") {
     page = (
-      <ProposalsLibrary
-        refreshKey={libraryRefreshKey}
-        userId={accountKey}
-        userName={currentUser.name}
-        userEmail={currentUser.email}
-        isDark={appDarkMode}
-        onOpenProposal={openProposalRecord}
-        onDownloadProposalPdf={handleDownloadPdfFromLibrary}
-        onNewProposal={startNewProposal}
-        onProposalUpdated={bumpSidebarRefresh}
-        onPinsChanged={bumpSidebarRefresh}
-        autoOpenCreate={pendingProjectCreate}
-        autoOpenCreateFolderId={pendingProjectFolderId}
-        onAutoOpenCreateHandled={() => {
-          setPendingProjectCreate(false);
-          setPendingProjectFolderId(null);
-        }}
-      />
+      <>
+        <IncomingProjects onAccept={startProposalFromClickUp} />
+        <ProposalsLibrary
+          refreshKey={libraryRefreshKey}
+          userId={accountKey}
+          userName={currentUser.name}
+          userEmail={currentUser.email}
+          isDark={appDarkMode}
+          onOpenProposal={openProposalRecord}
+          onDownloadProposalPdf={handleDownloadPdfFromLibrary}
+          onNewProposal={startNewProposal}
+          onProposalUpdated={bumpSidebarRefresh}
+          onPinsChanged={bumpSidebarRefresh}
+          autoOpenCreate={pendingProjectCreate}
+          autoOpenCreateFolderId={pendingProjectFolderId}
+          onAutoOpenCreateHandled={() => {
+            setPendingProjectCreate(false);
+            setPendingProjectFolderId(null);
+          }}
+        />
+      </>
     );
   } else {
     page = (

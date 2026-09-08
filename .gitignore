@@ -6,3 +6,5 @@ data/auth/
 .env.local
 *.log
 .DS_Store
+data/clickup/
+server/clickup.config.json

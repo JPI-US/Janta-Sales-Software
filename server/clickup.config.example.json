@@ -1,0 +1,15 @@
+{
+  "//": "Copy to server/clickup.config.json. Keys are case-insensitive ClickUp field names.",
+  "fieldMap": {
+    "Contact Person": "custName",
+    "Project Size (KW)": "systemSizeKw"
+  },
+  "//future": "When the contacts list is connected, set contactRelationField to the deal's relationship field name and map the contact task's fields below.",
+  "contactRelationField": null,
+  "contactNameFromTaskName": true,
+  "contactFieldMap": {
+    "Email": "custEmail",
+    "Phone": "custPhone",
+    "Address": "custAddress"
+  }
+}
