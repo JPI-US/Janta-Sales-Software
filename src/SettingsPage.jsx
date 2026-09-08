@@ -2,11 +2,12 @@ import React, { useEffect, useState } from "react";
 import * as authApi from "./authApi.js";
 import { slugifyUsername, uniqueUsernameFromDisplayName } from "../shared/authUsername.js";
 import { getAppTheme, pageShellStyle, sectionCardStyle } from "./appTheme.js";
+import { isAdminUser, ROLE_OPTIONS, ROLE_SALES, normalizeRole, roleLabel } from "../shared/roles.js";
 import { PageHeader, RibbonLabeledButton } from "./appIcons.jsx";
 
 function isSettingsSuccessMessage(msg) {
   if (!msg || typeof msg !== "string") return false;
-  return /^(Email updated|Password updated|User added|User removed|Role updated)/i.test(msg.trim());
+  return /^(Email updated|Password updated|User added|User removed|Role updated|User updated|Temporary password set)/i.test(msg.trim());
 }
 
 function fieldStyle(isDark) {
@@ -32,12 +33,27 @@ function primaryBtnStyle(isDark) {
     border: "none",
     borderRadius: 8,
     padding: "10px 14px",
-    background: isDark ? t.accent : "#2F3B4C",
-    color: isDark ? t.accentText : "#fff",
+    background: t.ctaBg,
+    color: t.ctaText,
     fontWeight: 600,
     cursor: "pointer",
     fontFamily: "Inter, system-ui, sans-serif",
     fontSize: 13,
+  };
+}
+
+function secondaryBtnStyle(isDark) {
+  const t = getAppTheme(isDark);
+  return {
+    padding: "6px 12px",
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+    borderRadius: 8,
+    border: `1px solid ${t.border}`,
+    background: t.inputBg,
+    color: t.title,
+    fontFamily: "Inter, system-ui, sans-serif",
   };
 }
 
@@ -70,7 +86,7 @@ function SettingsSection({ theme, title, description, children }) {
 
 export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate }) {
   const theme = getAppTheme(isDark);
-  const isAdmin = Boolean(currentUser?.isAdmin);
+  const isAdmin = isAdminUser(currentUser);
 
   const [teamMembers, setTeamMembers] = useState([]);
   const [settingsCurrentEmail, setSettingsCurrentEmail] = useState(currentUser?.email || "");
@@ -83,6 +99,12 @@ export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate
   const [addUserEmail, setAddUserEmail] = useState("");
   const [addUserPassword, setAddUserPassword] = useState("");
   const [addUserConfirm, setAddUserConfirm] = useState("");
+  const [addUserRole, setAddUserRole] = useState(ROLE_SALES);
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [resetIngId, setResetIngId] = useState(null);
+  const [resetPassword, setResetPassword] = useState("");
 
   useEffect(() => {
     setSettingsCurrentEmail(currentUser?.email || "");
@@ -113,15 +135,79 @@ export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate
     return true;
   }
 
-  async function setUserRole(target, nextIsAdmin) {
+  async function setUserRole(target, nextRole) {
     if (!canChangeUserRole(target)) return;
-    const wantAdmin = Boolean(nextIsAdmin);
+    const role = normalizeRole(nextRole);
     try {
-      const updated = await authApi.setTeamMemberRole(target.id, wantAdmin);
+      const updated = await authApi.setTeamMemberRole(target.id, role);
       setTeamMembers((prev) => prev.map((u) => (u.id === target.id ? updated : u)));
-      setSettingsMsg(`Role updated: ${target.name || target.username} is now ${wantAdmin ? "Admin" : "Member"}.`);
+      setSettingsMsg(`Role updated: ${target.name || target.username} is now ${roleLabel(role)}.`);
     } catch (err) {
       setSettingsMsg(err.message || "Could not update role.");
+    }
+  }
+
+  function startEditUser(target) {
+    setEditingId(target.id);
+    setEditName(target.name || "");
+    setEditEmail(target.email || "");
+    setResetIngId(null);
+    setSettingsMsg("");
+  }
+
+  function cancelEditUser() {
+    setEditingId(null);
+    setEditName("");
+    setEditEmail("");
+  }
+
+  async function saveEditUser(target) {
+    if (!isAdmin || !target) return;
+    const name = editName.trim();
+    const email = editEmail.trim().toLowerCase();
+    if (!name) {
+      setSettingsMsg("Display name cannot be empty.");
+      return;
+    }
+    if (!email.includes("@")) {
+      setSettingsMsg("Enter a valid email address.");
+      return;
+    }
+    try {
+      const updated = await authApi.updateTeamMember(target.id, { name, email });
+      setTeamMembers((prev) => prev.map((u) => (u.id === target.id ? updated : u)));
+      // Editing your own record must refresh the session user held by the app shell.
+      if (target.id === currentUser?.id && typeof onUserUpdate === "function") onUserUpdate(updated);
+      setSettingsMsg(`User updated: ${updated.name}.`);
+      cancelEditUser();
+    } catch (err) {
+      setSettingsMsg(err.message || "Could not update user.");
+    }
+  }
+
+  function startResetPassword(target) {
+    setResetIngId(target.id);
+    setResetPassword("");
+    setEditingId(null);
+    setSettingsMsg("");
+  }
+
+  async function saveResetPassword(target) {
+    if (!isAdmin || !target) return;
+    if (resetPassword.length < 6) {
+      setSettingsMsg("Temporary password must be at least 6 characters.");
+      return;
+    }
+    try {
+      const updated = await authApi.resetTeamMemberPassword(target.id, resetPassword);
+      setTeamMembers((prev) => prev.map((u) => (u.id === target.id ? updated : u)));
+      setSettingsMsg(
+        `Temporary password set for ${updated.name || updated.username}. They must change it at next sign-in.`
+      );
+      setResetIngId(null);
+      setResetPassword("");
+    } catch (err) {
+      setSettingsMsg(err.message || "Could not reset password.");
     }
   }
 
@@ -150,13 +236,14 @@ export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate
       return;
     }
     try {
-      const created = await authApi.addTeamMember(name, cleanEmail, addUserPassword);
+      const created = await authApi.addTeamMember(name, cleanEmail, addUserPassword, addUserRole);
       setTeamMembers((prev) => [...prev, created]);
       setSettingsMsg("User added.");
       setAddUserName("");
       setAddUserEmail("");
       setAddUserPassword("");
       setAddUserConfirm("");
+      setAddUserRole(ROLE_SALES);
     } catch (err) {
       setSettingsMsg(err.message || "Could not add user.");
     }
@@ -322,7 +409,7 @@ export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate
           <SettingsSection
             theme={theme}
             title="Team members"
-            description="Manage sign-in accounts. Display name becomes the username for login."
+            description="Admin, Sales, or Marketing. Sales and Marketing can view each other’s work but only edit their own. Only Admin can dismiss incoming ClickUp projects. New accounts start on a temporary password and must set their own at first sign-in."
           >
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: theme.subtle, marginBottom: 10 }}>
@@ -341,7 +428,7 @@ export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate
                     })
                     .map((u) => {
                       const isYou = u.id === currentUser.id;
-                      const admin = Boolean(u.isAdmin);
+                      const memberRole = normalizeRole(u);
                       return (
                         <div
                           key={u.id}
@@ -362,14 +449,51 @@ export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate
                               @{u.username || "—"}
                               {isYou ? " (you)" : ""}
                             </div>
-                            <div style={{ fontSize: 12, color: theme.subtle }}>{u.name || u.email}</div>
-                            <div style={{ fontSize: 11, color: theme.subtle, marginTop: 2 }}>{u.email}</div>
+                            {editingId === u.id ? (
+                              <div style={{ display: "grid", gap: 6, marginTop: 6, maxWidth: 260 }}>
+                                <input
+                                  value={editName}
+                                  onChange={(e) => setEditName(e.target.value)}
+                                  placeholder="Display name"
+                                  style={{ ...fieldStyle(isDark), marginBottom: 0 }}
+                                />
+                                <input
+                                  value={editEmail}
+                                  onChange={(e) => setEditEmail(e.target.value)}
+                                  placeholder="Email"
+                                  type="email"
+                                  autoCapitalize="off"
+                                  autoCorrect="off"
+                                  style={{ ...fieldStyle(isDark), marginBottom: 0 }}
+                                />
+                                <div style={{ fontSize: 11, color: theme.subtle }}>
+                                  The @username is fixed once created — only the name and email change here.
+                                </div>
+                                {editEmail.trim().toLowerCase() !== String(u.email || "").toLowerCase() ? (
+                                  <div style={{ fontSize: 11, color: theme.errorText, lineHeight: 1.45 }}>
+                                    Heads up: proposal storage is keyed by email. Changing it starts this
+                                    account on an empty library — their existing proposals stay under the old
+                                    address until an admin moves them on the server.
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : (
+                              <>
+                                <div style={{ fontSize: 12, color: theme.subtle }}>{u.name || u.email}</div>
+                                <div style={{ fontSize: 11, color: theme.subtle, marginTop: 2 }}>{u.email}</div>
+                                {u.mustChangePassword ? (
+                                  <div style={{ fontSize: 11, color: theme.accent, marginTop: 4 }}>
+                                    Temporary password — must change at next sign-in
+                                  </div>
+                                ) : null}
+                              </>
+                            )}
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                             {canChangeUserRole(u) ? (
                               <select
-                                value={admin ? "admin" : "member"}
-                                onChange={(e) => setUserRole(u, e.target.value === "admin")}
+                                value={memberRole}
+                                onChange={(e) => setUserRole(u, e.target.value)}
                                 style={{
                                   padding: "6px 10px",
                                   borderRadius: 8,
@@ -381,8 +505,11 @@ export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate
                                   cursor: "pointer",
                                 }}
                               >
-                                <option value="member">Member</option>
-                                <option value="admin">Admin</option>
+                                {ROLE_OPTIONS.map((o) => (
+                                  <option key={o.value} value={o.value}>
+                                    {o.label}
+                                  </option>
+                                ))}
                               </select>
                             ) : (
                               <span
@@ -397,16 +524,71 @@ export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate
                                   border: `1px solid ${theme.border}`,
                                 }}
                               >
-                                {admin ? "Admin" : "Member"}
+                                {roleLabel(memberRole)}
                                 {u.protected ? " · Protected" : ""}
                               </span>
                             )}
+                            {isAdmin && editingId === u.id ? (
+                              <>
+                                <button type="button" onClick={() => saveEditUser(u)} style={primaryBtnStyle(isDark)}>
+                                  Save
+                                </button>
+                                <button type="button" onClick={cancelEditUser} style={secondaryBtnStyle(isDark)}>
+                                  Cancel
+                                </button>
+                              </>
+                            ) : null}
+                            {isAdmin && editingId !== u.id ? (
+                              <button type="button" onClick={() => startEditUser(u)} style={secondaryBtnStyle(isDark)}>
+                                Edit
+                              </button>
+                            ) : null}
+                            {isAdmin && !isYou && resetIngId !== u.id ? (
+                              <button type="button" onClick={() => startResetPassword(u)} style={secondaryBtnStyle(isDark)}>
+                                Reset password
+                              </button>
+                            ) : null}
                             {!isYou && canRemoveUser(u) ? (
                               <button type="button" onClick={() => removeInviteUser(u)} style={dangerBtnStyle(isDark)}>
                                 Remove
                               </button>
                             ) : null}
                           </div>
+                          {isAdmin && resetIngId === u.id ? (
+                            <div
+                              style={{
+                                flexBasis: "100%",
+                                display: "flex",
+                                flexWrap: "wrap",
+                                gap: 8,
+                                alignItems: "center",
+                                paddingTop: 10,
+                                marginTop: 4,
+                                borderTop: `1px solid ${theme.border}`,
+                              }}
+                            >
+                              <input
+                                type="text"
+                                value={resetPassword}
+                                onChange={(e) => setResetPassword(e.target.value)}
+                                placeholder="Temporary password to hand over"
+                                style={{ ...fieldStyle(isDark), marginBottom: 0, flex: "1 1 220px", width: "auto" }}
+                              />
+                              <button type="button" onClick={() => saveResetPassword(u)} style={primaryBtnStyle(isDark)}>
+                                Set temporary password
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setResetIngId(null);
+                                  setResetPassword("");
+                                }}
+                                style={secondaryBtnStyle(isDark)}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : null}
                         </div>
                       );
                     })}
@@ -442,16 +624,27 @@ export default function SettingsPage({ currentUser, isDark, onBack, onUserUpdate
                 type="password"
                 value={addUserPassword}
                 onChange={(e) => setAddUserPassword(e.target.value)}
-                placeholder="Initial password"
+                placeholder="Temporary password"
                 style={{ ...fieldStyle(isDark), marginBottom: 0 }}
               />
               <input
                 type="password"
                 value={addUserConfirm}
                 onChange={(e) => setAddUserConfirm(e.target.value)}
-                placeholder="Confirm password"
+                placeholder="Confirm temporary password"
                 style={{ ...fieldStyle(isDark), marginBottom: 0 }}
               />
+              <select
+                value={addUserRole}
+                onChange={(e) => setAddUserRole(e.target.value)}
+                style={{ ...fieldStyle(isDark), marginBottom: 0 }}
+              >
+                {ROLE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
             </div>
             {addUserName.trim() ? (
               <div style={{ fontSize: 12, color: theme.subtle, margin: "10px 0" }}>

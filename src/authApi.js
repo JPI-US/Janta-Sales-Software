@@ -62,10 +62,10 @@ export async function listTeam() {
   return data.users || [];
 }
 
-export async function addTeamMember(name, email, password) {
+export async function addTeamMember(name, email, password, role) {
   const data = await request("/api/auth/users", {
     method: "POST",
-    body: JSON.stringify({ name, email, password }),
+    body: JSON.stringify({ name, email, password, role }),
   });
   return data.user;
 }
@@ -74,10 +74,26 @@ export async function removeTeamMember(id) {
   await request(`/api/auth/users/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function setTeamMemberRole(id, isAdmin) {
+export async function setTeamMemberRole(id, role) {
   const data = await request(`/api/auth/users/${encodeURIComponent(id)}/role`, {
     method: "PATCH",
-    body: JSON.stringify({ isAdmin }),
+    body: JSON.stringify({ role }),
+  });
+  return data.user;
+}
+
+export async function updateTeamMember(id, patch) {
+  const data = await request(`/api/auth/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+  return data.user;
+}
+
+export async function resetTeamMemberPassword(id, password) {
+  const data = await request(`/api/auth/users/${encodeURIComponent(id)}/password`, {
+    method: "PATCH",
+    body: JSON.stringify({ password }),
   });
   return data.user;
 }

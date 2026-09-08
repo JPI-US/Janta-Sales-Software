@@ -12,6 +12,7 @@ import {
 import { readJson, send } from "./httpUtils.js";
 import { authenticateRequest } from "./auth/sessions.js";
 import { DEFAULT_DATA_DIR } from "./proposalsApi.js";
+import { canAccessSalesReport } from "../shared/roles.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -83,7 +84,7 @@ export function createReportsApiHandler({ dataDir = DEFAULT_DATA_DIR, authDataDi
     try {
       const session = await authenticateRequest(req, { dataDir: authDataDir });
       if (!session) return send(res, 401, { error: "Authentication required" });
-      if (!session.user?.isAdmin) return send(res, 403, { error: "Admin access required" });
+      if (!canAccessSalesReport(session.user)) return send(res, 403, { error: "Sales or admin access required" });
 
       if (req.method !== "GET") return send(res, 405, { error: "Method not allowed" });
 

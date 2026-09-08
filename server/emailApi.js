@@ -5,6 +5,7 @@ import { readJson, writeJson, readBody, send } from "./httpUtils.js";
 import { authenticateRequest } from "./auth/sessions.js";
 import { DEFAULT_DATA_DIR } from "./proposalsApi.js";
 import { normalizeCampaignPosts } from "../shared/campaignPosting.js";
+import { isAdminUser } from "../shared/roles.js";
 
 function userDir(dataDir, userId) {
   const safe = String(userId).replace(/[^a-zA-Z0-9_-]/g, "");
@@ -256,7 +257,7 @@ export function createEmailApiHandler({ dataDir = DEFAULT_DATA_DIR, authDataDir 
       const queueItemMatch = url.pathname.match(/^\/api\/email\/queue\/([^/]+)$/);
 
       function assertOwnerOrAdmin(userId) {
-        if (userId === accountKey || session.user?.isAdmin) return true;
+        if (userId === accountKey || isAdminUser(session.user)) return true;
         send(res, 403, { error: "Forbidden" });
         return false;
       }
@@ -265,11 +266,10 @@ export function createEmailApiHandler({ dataDir = DEFAULT_DATA_DIR, authDataDir 
 
       if (studioMatch) {
         const userId = decodeURIComponent(studioMatch[1]);
-        if (!assertOwnerOrAdmin(userId)) return;
-
         if (req.method === "GET") {
           return send(res, 200, { store: loadStudioStore(dataDir, userId) });
         }
+        if (!assertOwnerOrAdmin(userId)) return;
         if (req.method === "PUT") {
           const body = await readBody(req);
           const store = body?.store && typeof body.store === "object" ? body.store : body;
@@ -391,10 +391,7 @@ export function createEmailApiHandler({ dataDir = DEFAULT_DATA_DIR, authDataDir 
       if (url.pathname === "/api/email/campaigns" && req.method === "GET") {
         const days = Math.min(90, Math.max(7, Number(url.searchParams.get("days") || 30)));
         const cutoff = Date.now() - days * 86400000;
-        let campaigns = loadAllCampaigns(dataDir).filter((c) => new Date(c.copiedAt || 0).getTime() >= cutoff);
-        if (!session.user?.isAdmin) {
-          campaigns = campaigns.filter((c) => c.userId === accountKey);
-        }
+        const campaigns = loadAllCampaigns(dataDir).filter((c) => new Date(c.copiedAt || 0).getTime() >= cutoff);
         return send(res, 200, { campaigns });
       }
 

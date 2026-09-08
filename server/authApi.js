@@ -3,6 +3,7 @@ import {
   DEFAULT_AUTH_DATA_DIR,
   findUserByLoginId,
   findUserById,
+  findUserByEmail,
   createUser,
   updateUserFields,
   setUserPassword,
@@ -14,6 +15,7 @@ import { verifyPassword } from "./auth/passwords.js";
 import { createSession, destroySession, authenticateRequest, SESSION_COOKIE_NAME } from "./auth/sessions.js";
 import { serializeCookie } from "./auth/cookies.js";
 import { ensureBootstrapAdmin } from "./auth/bootstrapAdmin.js";
+import { isAdminUser, normalizeRole, ROLE_SALES } from "../shared/roles.js";
 
 function cookieSecure() {
   return String(process.env.COOKIE_SECURE || "").toLowerCase() === "true";
@@ -120,16 +122,16 @@ export function createAuthApiHandler({ dataDir = DEFAULT_AUTH_DATA_DIR } = {}) {
       }
 
       if (url.pathname === "/api/auth/users" && req.method === "GET") {
-        if (!session.user.isAdmin) return send(res, 403, { error: "Forbidden" });
         return send(res, 200, { users: listPublicUsers(dataDir) });
       }
 
       if (url.pathname === "/api/auth/users" && req.method === "POST") {
-        if (!session.user.isAdmin) return send(res, 403, { error: "Forbidden" });
+        if (!isAdminUser(session.user)) return send(res, 403, { error: "Forbidden" });
         const body = await readBody(req);
         const name = String(body?.name || "").trim();
         const email = String(body?.email || "").trim().toLowerCase();
         const password = String(body?.password || "");
+        const role = normalizeRole(body?.role || ROLE_SALES);
         if (!name || !email || !email.includes("@")) {
           return send(res, 400, { error: "Name and a valid email are required." });
         }
@@ -137,7 +139,14 @@ export function createAuthApiHandler({ dataDir = DEFAULT_AUTH_DATA_DIR } = {}) {
           return send(res, 400, { error: "Password must be at least 6 characters." });
         }
         try {
-          const created = await createUser(dataDir, { name, email, password, isAdmin: false, protected: false });
+          const created = await createUser(dataDir, {
+            name,
+            email,
+            password,
+            role,
+            protected: false,
+            mustChangePassword: true,
+          });
           return send(res, 201, { user: created });
         } catch (err) {
           return send(res, 400, { error: err.message || "Could not create user." });
@@ -146,7 +155,7 @@ export function createAuthApiHandler({ dataDir = DEFAULT_AUTH_DATA_DIR } = {}) {
 
       const userIdMatch = url.pathname.match(/^\/api\/auth\/users\/([^/]+)$/);
       if (userIdMatch && req.method === "DELETE") {
-        if (!session.user.isAdmin) return send(res, 403, { error: "Forbidden" });
+        if (!isAdminUser(session.user)) return send(res, 403, { error: "Forbidden" });
         const targetId = decodeURIComponent(userIdMatch[1]);
         const target = findUserById(dataDir, targetId);
         if (!target) return send(res, 404, { error: "Not found" });
@@ -157,9 +166,58 @@ export function createAuthApiHandler({ dataDir = DEFAULT_AUTH_DATA_DIR } = {}) {
         return send(res, 200, { ok: true });
       }
 
+      // Admin: edit another account's display name and/or email.
+      const editMatch = url.pathname.match(/^\/api\/auth\/users\/([^/]+)$/);
+      if (editMatch && req.method === "PATCH") {
+        if (!isAdminUser(session.user)) return send(res, 403, { error: "Forbidden" });
+        const targetId = decodeURIComponent(editMatch[1]);
+        const target = findUserById(dataDir, targetId);
+        if (!target) return send(res, 404, { error: "Not found" });
+        const body = await readBody(req);
+        const patch = {};
+        if (body?.name != null) {
+          const name = String(body.name).trim();
+          if (!name) return send(res, 400, { error: "Display name cannot be empty." });
+          patch.name = name;
+        }
+        if (body?.email != null) {
+          const email = String(body.email).trim().toLowerCase();
+          if (!email || !email.includes("@")) return send(res, 400, { error: "Enter a valid email." });
+          const clash = findUserByEmail(dataDir, email);
+          if (clash && clash.id !== targetId) {
+            return send(res, 400, { error: "That email is already in use." });
+          }
+          patch.email = email;
+        }
+        if (!Object.keys(patch).length) return send(res, 400, { error: "Nothing to update." });
+        const updated = updateUserFields(dataDir, targetId, patch);
+        return send(res, 200, { user: updated });
+      }
+
+      // Admin: issue a temporary password. The user must change it at next sign-in.
+      const resetMatch = url.pathname.match(/^\/api\/auth\/users\/([^/]+)\/password$/);
+      if (resetMatch && req.method === "PATCH") {
+        if (!isAdminUser(session.user)) return send(res, 403, { error: "Forbidden" });
+        const targetId = decodeURIComponent(resetMatch[1]);
+        const target = findUserById(dataDir, targetId);
+        if (!target) return send(res, 404, { error: "Not found" });
+        if (target.id === session.user.id) {
+          return send(res, 400, { error: "Use the Password section to change your own password." });
+        }
+        const body = await readBody(req);
+        const temporaryPassword = String(body?.password || "");
+        if (temporaryPassword.length < 6) {
+          return send(res, 400, { error: "Temporary password must be at least 6 characters." });
+        }
+        const updated = await setUserPassword(dataDir, targetId, temporaryPassword, {
+          mustChangePassword: true,
+        });
+        return send(res, 200, { user: updated });
+      }
+
       const roleMatch = url.pathname.match(/^\/api\/auth\/users\/([^/]+)\/role$/);
       if (roleMatch && req.method === "PATCH") {
-        if (!session.user.isAdmin) return send(res, 403, { error: "Forbidden" });
+        if (!isAdminUser(session.user)) return send(res, 403, { error: "Forbidden" });
         const targetId = decodeURIComponent(roleMatch[1]);
         const target = findUserById(dataDir, targetId);
         if (!target) return send(res, 404, { error: "Not found" });
@@ -167,7 +225,8 @@ export function createAuthApiHandler({ dataDir = DEFAULT_AUTH_DATA_DIR } = {}) {
           return send(res, 403, { error: "This account's role cannot be changed." });
         }
         const body = await readBody(req);
-        const updated = updateUserFields(dataDir, targetId, { isAdmin: Boolean(body?.isAdmin) });
+        const role = body?.role != null ? normalizeRole(body.role) : body?.isAdmin ? "admin" : ROLE_SALES;
+        const updated = updateUserFields(dataDir, targetId, { role });
         return send(res, 200, { user: updated });
       }
 

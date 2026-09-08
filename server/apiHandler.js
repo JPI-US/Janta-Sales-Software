@@ -7,6 +7,7 @@ import { createSocialApiHandler } from "./socialApi.js";
 import { createMarketingApiHandler } from "./marketingApi.js";
 import { createClickUpApiHandler } from "./clickupApi.js";
 import { DEFAULT_AUTH_DATA_DIR } from "./auth/userStore.js";
+import { createPasswordChangeGate } from "./auth/passwordGate.js";
 import { send } from "./httpUtils.js";
 
 export function createApiHandler({ dataDir = DEFAULT_DATA_DIR, authDataDir = DEFAULT_AUTH_DATA_DIR } = {}) {
@@ -18,13 +19,20 @@ export function createApiHandler({ dataDir = DEFAULT_DATA_DIR, authDataDir = DEF
   const socialHandler = createSocialApiHandler({ dataDir, authDataDir });
   const marketingHandler = createMarketingApiHandler({ dataDir, authDataDir });
   const clickupHandler = createClickUpApiHandler({ authDataDir });
+  // Runs ahead of every feature handler so a pending forced password change
+  // cannot be skipped by calling the API directly.
+  const passwordGate = createPasswordChangeGate({ dataDir: authDataDir });
   return async function apiHandler(req, res, next) {
-    await authHandler(req, res, () =>
-      clickupHandler(req, res, () =>
-        marketingHandler(req, res, () =>
-          socialHandler(req, res, () =>
-            emailHandler(req, res, () =>
-              mediaHandler(req, res, () => reportsHandler(req, res, () => proposalsHandler(req, res, next)))
+    await passwordGate(req, res, () =>
+      authHandler(req, res, () =>
+        clickupHandler(req, res, () =>
+          marketingHandler(req, res, () =>
+            socialHandler(req, res, () =>
+              emailHandler(req, res, () =>
+                mediaHandler(req, res, () =>
+                  reportsHandler(req, res, () => proposalsHandler(req, res, next))
+                )
+              )
             )
           )
         )

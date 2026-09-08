@@ -13,6 +13,7 @@ import { proposalStorageKey } from "../shared/proposalAccount.js";
 import { readJson, writeJson, readBody, send } from "./httpUtils.js";
 import { authenticateRequest } from "./auth/sessions.js";
 import { DEFAULT_AUTH_DATA_DIR } from "./auth/userStore.js";
+import { isAdminUser } from "../shared/roles.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_DATA_DIR = path.resolve(__dirname, "../data/cloud-proposals");
@@ -85,13 +86,40 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR, authData
       if (!session) return send(res, 401, { error: "Authentication required" });
 
       function assertOwnerOrAdmin(userId) {
-        if (userId === proposalStorageKey(session.user) || session.user.isAdmin) return true;
+        if (userId === proposalStorageKey(session.user) || isAdminUser(session.user)) return true;
         send(res, 403, { error: "Forbidden" });
         return false;
       }
 
+      function listAccountDirs() {
+        try {
+          if (!fs.existsSync(dataDir)) return [];
+          return fs.readdirSync(dataDir).filter((name) => {
+            try {
+              return fs.statSync(path.join(dataDir, name)).isDirectory();
+            } catch {
+              return false;
+            }
+          });
+        } catch {
+          return [];
+        }
+      }
+
       if (url.pathname === "/api/hubspot/status" && req.method === "GET") {
         return send(res, 200, { configured: isHubSpotConfigured() });
+      }
+
+      if (url.pathname === "/api/proposals" && req.method === "GET") {
+        const status = url.searchParams.get("status");
+        const out = [];
+        for (const key of listAccountDirs()) {
+          let rows = loadProposalsStore(dataDir, key);
+          if (status) rows = rows.filter((p) => p.status === status);
+          for (const row of rows) out.push(applyCrmDefaults({ ...row, userId: key }));
+        }
+        out.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+        return send(res, 200, { proposals: out });
       }
 
       const listMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/proposals$/);
@@ -126,10 +154,10 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR, authData
 
       if (listMatch) {
         const userId = decodeURIComponent(listMatch[1]);
-        if (!assertOwnerOrAdmin(userId)) return;
         ensureUserDir(dataDir, userId);
 
         if (req.method === "POST") {
+          if (!assertOwnerOrAdmin(userId)) return;
           const body = await readBody(req);
           if (!body?.snapshot) return send(res, 400, { error: "snapshot required" });
           const proposals = loadProposalsStore(dataDir, userId);
@@ -146,7 +174,8 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR, authData
           let rows = loadProposalsStore(dataDir, userId);
           const status = url.searchParams.get("status");
           if (status) rows = rows.filter((p) => p.status === status);
-          rows.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)); return send(res, 200, { proposals: rows.map(applyCrmDefaults) });
+          rows.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+          return send(res, 200, { proposals: rows.map((row) => applyCrmDefaults({ ...row, userId })) });
         }
       }
 
@@ -176,15 +205,16 @@ export function createProposalsApiHandler({ dataDir = DEFAULT_DATA_DIR, authData
       if (oneMatch) {
         const userId = decodeURIComponent(oneMatch[1]);
         const proposalId = decodeURIComponent(oneMatch[2]);
-        if (!assertOwnerOrAdmin(userId)) return;
         ensureUserDir(dataDir, userId);
         const proposals = loadProposalsStore(dataDir, userId);
 
         if (req.method === "GET") {
           const row = proposals.find((p) => p.id === proposalId);
           if (!row) return send(res, 404, { error: "Not found" });
-          return send(res, 200, { proposal: applyCrmDefaults(row) });
+          return send(res, 200, { proposal: applyCrmDefaults({ ...row, userId }) });
         }
+
+        if (!assertOwnerOrAdmin(userId)) return;
 
         if (req.method === "PUT") {
           const body = await readBody(req);

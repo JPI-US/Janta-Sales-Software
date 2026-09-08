@@ -10,6 +10,7 @@ import { JANTA_SITE_ORIGIN } from "../shared/campaignPosting.js";
 import { readJson, writeJson, readBody, send } from "./httpUtils.js";
 import { authenticateRequest } from "./auth/sessions.js";
 import { DEFAULT_DATA_DIR } from "./proposalsApi.js";
+import { canAccessMarketingReport } from "../shared/roles.js";
 
 function settingsPath(dataDir) {
   return path.join(dataDir, "marketing-settings.json");
@@ -59,7 +60,7 @@ export function createMarketingApiHandler({ dataDir = DEFAULT_DATA_DIR, authData
     try {
       const session = await authenticateRequest(req, { dataDir: authDataDir });
       if (!session) return send(res, 401, { error: "Authentication required" });
-      if (!session.user?.isAdmin) return send(res, 403, { error: "Admin access required" });
+      if (!canAccessMarketingReport(session.user)) return send(res, 403, { error: "Marketing or admin access required" });
 
       if (url.pathname === "/api/marketing/settings" && req.method === "GET") {
         const settings = loadMeetingSettings(dataDir);

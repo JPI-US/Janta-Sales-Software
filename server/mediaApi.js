@@ -14,6 +14,7 @@ import { fetchInstagramChannel } from "./integrations/mediaMeta.js";
 import { fetchLinkedInChannel } from "./integrations/mediaLinkedIn.js";
 import { loadAllCampaigns } from "./emailApi.js";
 import { DEFAULT_DATA_DIR } from "./proposalsApi.js";
+import { canAccessMarketingReport } from "../shared/roles.js";
 
 function parseDaysParam(raw) {
   const n = Number(raw);
@@ -96,7 +97,7 @@ export function createMediaApiHandler({ dataDir = DEFAULT_DATA_DIR, authDataDir 
     try {
       const session = await authenticateRequest(req, { dataDir: authDataDir });
       if (!session) return send(res, 401, { error: "Authentication required" });
-      if (!session.user?.isAdmin) return send(res, 403, { error: "Admin access required" });
+      if (!canAccessMarketingReport(session.user)) return send(res, 403, { error: "Marketing or admin access required" });
 
       if (req.method !== "GET") return send(res, 405, { error: "Method not allowed" });
 

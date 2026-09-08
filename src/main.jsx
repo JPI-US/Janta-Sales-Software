@@ -4,6 +4,7 @@ import "@fontsource/inter/400.css";
 import "@fontsource/inter/600.css";
 import "@fontsource/inter/700.css";
 import ProposalApp from "./ProposalApp.jsx";
+import ForcePasswordChange from "./ForcePasswordChange.jsx";
 import * as authApi from "./authApi.js";
 import { proposalStorageKey } from "../shared/proposalAccount.js";
 import { confirmSignOut } from "./appIcons.jsx";
@@ -82,6 +83,16 @@ function AuthGate() {
     );
   }
 
+  if (currentUser?.mustChangePassword) {
+    return (
+      <ForcePasswordChange
+        user={currentUser}
+        onUserUpdate={setCurrentUser}
+        onSignOut={handleSignOut}
+      />
+    );
+  }
+
   if (currentUser) {
     return (
       <ProposalApp
@@ -156,8 +167,8 @@ function AuthGate() {
           boxShadow: "0 18px 40px rgba(0,0,0,0.28)",
         }}
       >
-        <h2 style={{ margin: "0 0 4px 0", color: "#2F3B4C" }}>Sign in</h2>
-        <p style={{ margin: "0 0 14px 0", color: "#6F8096", fontSize: 13 }}>
+        <h2 style={{ margin: "0 0 4px 0", color: "#1A2233" }}>Sign in</h2>
+        <p style={{ margin: "0 0 14px 0", color: "#6B7A90", fontSize: 13 }}>
           Access the Janta Proposal Generator.
         </p>
         <input
@@ -190,7 +201,7 @@ function AuthGate() {
               background: "transparent",
               cursor: "pointer",
               lineHeight: 1,
-              color: "#6F8096",
+              color: "#6B7A90",
               padding: 2,
               display: "grid",
               placeItems: "center",
@@ -246,7 +257,7 @@ function AuthGate() {
             border: "none",
             borderRadius: 8,
             padding: "10px 12px",
-            background: "#2F3B4C",
+            background: "#0B2545",
             color: "#fff",
             fontWeight: 600,
             cursor: "pointer",
@@ -255,7 +266,7 @@ function AuthGate() {
         >
           Sign in
         </button>
-        <p style={{ margin: 0, color: "#6F8096", fontSize: 12 }}>
+        <p style={{ margin: 0, color: "#6B7A90", fontSize: 12 }}>
           Accounts are managed by admins only.
         </p>
       </div>
@@ -266,7 +277,7 @@ function AuthGate() {
 const inputStyle = {
   width: "100%",
   boxSizing: "border-box",
-  border: "1px solid #DDE2E8",
+  border: "1px solid #E3E8F0",
   borderRadius: 8,
   padding: "10px 12px",
   marginBottom: 10,

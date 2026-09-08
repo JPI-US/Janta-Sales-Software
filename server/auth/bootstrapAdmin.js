@@ -14,6 +14,7 @@ export async function ensureBootstrapAdmin(dataDir) {
     email,
     password,
     isAdmin: true,
+    role: "admin",
     protected: true,
   });
   console.log(`[auth] Bootstrapped admin account for ${email}`);
