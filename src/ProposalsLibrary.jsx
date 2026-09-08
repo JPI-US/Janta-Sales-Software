@@ -55,11 +55,12 @@ import {
   deleteProposal,
   deriveProposalTitle,
   editableProjectTitle,
-  listProposalsForUser,
+  listTeamProposals,
   PROPOSAL_STATUS_CLOSED,
   saveProposal,
   saveProposalCrmFields,
 } from "./proposalStorage.js";
+import { canCreateProjects, canEditOwnedRecord } from "../shared/roles.js";
 import { isProposalPinned, readPinnedProposalIds, togglePinnedProposal } from "./pinnedProposals.js";
 import CollapsibleTableSection from "./CollapsibleTableSection.jsx";
 import EmptyTablePlaceholder from "./EmptyTablePlaceholder.jsx";
@@ -92,6 +93,8 @@ export default function ProposalsLibrary({
   autoOpenCreate = false,
   autoOpenCreateFolderId = null,
   onAutoOpenCreateHandled,
+  topSlot = null,
+  currentUser = null,
 }) {
   const [proposals, setProposals] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -123,16 +126,20 @@ export default function ProposalsLibrary({
 
   useEffect(() => {
     if (!autoOpenCreate) return;
+    if (!canCreateProjects(currentUser)) {
+      onAutoOpenCreateHandled?.();
+      return;
+    }
     setCreateFolderId(autoOpenCreateFolderId || null);
     setCreateDialogOpen(true);
     onAutoOpenCreateHandled?.();
-  }, [autoOpenCreate, autoOpenCreateFolderId, onAutoOpenCreateHandled]);
+  }, [autoOpenCreate, autoOpenCreateFolderId, onAutoOpenCreateHandled, currentUser]);
 
   const loadProposals = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const rows = await listProposalsForUser(userId, { userEmail });
+      const rows = await listTeamProposals(userId, { userEmail });
       setProposals(rows);
     } catch (err) {
       setError(err.message || "Could not load proposals from cloud.");
@@ -228,6 +235,8 @@ export default function ProposalsLibrary({
 
   const t = getAppTheme(isDark);
   const { panel, border, title, subtle, headBg, inputBg, accent, accentText, errorBg, errorBorder, errorText } = t;
+  const allowCreate = canCreateProjects(currentUser);
+  const canEditRow = (p) => canEditOwnedRecord(currentUser, p?.userId, userId);
 
   const searchFiltered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -338,10 +347,11 @@ export default function ProposalsLibrary({
   }, [searchFiltered, scopeForFilterCounts, activeProjects.length, closedProjects.length, listFilter]);
 
   async function handleDelete(p) {
+    if (!canEditRow(p)) return;
     const label = crmProjectName(p);
     if (!window.confirm(`Delete "${label}"? This cannot be undone.`)) return;
     try {
-      await deleteProposal(p.id, userId);
+      await deleteProposal(p.id, p.userId || userId);
       await loadProposals();
       if (typeof onPinsChanged === "function") onPinsChanged();
     } catch (err) {
@@ -350,17 +360,18 @@ export default function ProposalsLibrary({
   }
 
   async function handleReopen(p) {
+    if (!canEditRow(p)) return;
     setCrmBusyId(p.id);
     try {
       await saveProposal({
-        userId,
+        userId: p.userId || userId,
         id: p.id,
         title: p.title,
         snapshot: p.snapshot,
         status: "in_progress",
         userEmail,
       });
-      await saveProposalCrmFields({ userId, id: p.id, userEmail, stage: CRM_STAGE_CREATED });
+      await saveProposalCrmFields({ userId: p.userId || userId, id: p.id, userEmail, stage: CRM_STAGE_CREATED });
       if (isProposalTableCollapsed(userId, "closed")) toggleProposalTableCollapsed(userId, "closed");
       setFolderTick((n) => n + 1);
       await loadProposals();
@@ -373,6 +384,7 @@ export default function ProposalsLibrary({
   }
 
   async function handleCrmChange(p, patch) {
+    if (!canEditRow(p)) return;
     setCrmBusyId(p.id);
     try {
       const nextStage = patch.stage !== undefined ? patch.stage || null : normalizeCrmStage(p.stage);
@@ -382,7 +394,7 @@ export default function ProposalsLibrary({
 
       if (needsStatusUpdate) {
         await saveProposal({
-          userId,
+          userId: p.userId || userId,
           id: p.id,
           title: p.title,
           snapshot: p.snapshot,
@@ -396,7 +408,7 @@ export default function ProposalsLibrary({
       }
 
       await saveProposalCrmFields({
-        userId,
+        userId: p.userId || userId,
         id: p.id,
         userEmail,
         ...patch,
@@ -452,6 +464,7 @@ export default function ProposalsLibrary({
   );
 
   async function handleTitleChange(p, rawName) {
+    if (!canEditRow(p)) return;
     const name = String(rawName || "").trim();
     const current = editableProjectTitle(p);
     if (!name || name === current) return;
@@ -459,7 +472,7 @@ export default function ProposalsLibrary({
     try {
       const snapshot = { ...(p.snapshot || {}), proposalTitle: name };
       await saveProposal({
-        userId,
+        userId: p.userId || userId,
         id: p.id,
         title: deriveProposalTitle(snapshot),
         snapshot,
@@ -476,10 +489,12 @@ export default function ProposalsLibrary({
   }
 
   async function handleNew() {
+    if (!allowCreate) return;
     setCreateDialogOpen(true);
   }
 
   function handleNewFolder() {
+    if (!allowCreate) return;
     const name = window.prompt("Folder name", "New folder");
     if (!name?.trim()) return;
     createProposalFolder(userId, name.trim());
@@ -487,6 +502,7 @@ export default function ProposalsLibrary({
   }
 
   async function handleCreateProject(name) {
+    if (!allowCreate) return;
     setCreating(true);
     try {
       if (typeof onNewProposal !== "function") return;
@@ -502,6 +518,7 @@ export default function ProposalsLibrary({
   }
 
   function openCreateForFolder(folderId) {
+    if (!allowCreate) return;
     setCreateFolderId(folderId || null);
     setCreateDialogOpen(true);
   }
@@ -533,7 +550,7 @@ export default function ProposalsLibrary({
         title="Projects"
         subtitle={[userName, userEmail].filter(Boolean).join(" · ")}
       >
-        {hubspotConfigured ? (
+        {hubspotConfigured && allowCreate ? (
           <RibbonLabeledButton
             theme={t}
             icon="link"
@@ -545,38 +562,43 @@ export default function ProposalsLibrary({
             HubSpot
           </RibbonLabeledButton>
         ) : null}
-        <RibbonLabeledButton
-          theme={t}
-          icon="folder"
-          variant="surface"
-          title="Create a folder for projects"
-          onClick={handleNewFolder}
-        >
-          Create projects folder
-        </RibbonLabeledButton>
-        <RibbonLabeledButton
-          theme={t}
-          icon="plus"
-          variant="primary"
-          title="Create a new solar proposal"
-          onClick={handleNew}
-          disabled={creating}
-        >
-          {creating ? "Creating…" : "New project"}
-        </RibbonLabeledButton>
+        {allowCreate ? (
+          <RibbonLabeledButton
+            theme={t}
+            icon="folder"
+            variant="surface"
+            title="Create a folder for projects"
+            onClick={handleNewFolder}
+          >
+            Create projects folder
+          </RibbonLabeledButton>
+        ) : null}
+        {allowCreate ? (
+          <RibbonLabeledButton
+            theme={t}
+            icon="plus"
+            variant="primary"
+            title="Create a new solar proposal"
+            onClick={handleNew}
+            disabled={creating}
+          >
+            {creating ? "Creating…" : "New project"}
+          </RibbonLabeledButton>
+        ) : null}
       </PageHeader>
 
       <div style={{ ...pageShellStyle(), flex: 1, overflow: "auto" }}>
+        {topSlot || null}
         {hubspotNote ? (
           <div
             style={{
-              background: isDark ? "#1A271F" : "#ECF8F5",
-              border: `1px solid ${isDark ? "#2D4A38" : "#CBECE4"}`,
+              background: t.successBg,
+              border: `1px solid ${t.successBorder}`,
               borderRadius: 10,
               padding: "10px 14px",
               marginBottom: 14,
               fontSize: 12,
-              color: isDark ? "#D9F2E3" : "#0D5C4A",
+              color: t.successText,
             }}
           >
             {hubspotNote}
@@ -722,6 +744,7 @@ export default function ProposalsLibrary({
                             onDownload={handleDownload}
                             onDelete={handleDelete}
                             onTitleChange={handleTitleChange}
+                            canEditRow={canEditRow}
                             titleBusyId={titleBusyId}
                             pinnedIds={pinnedIds}
                             onRowContextMenu={openRowMenu}
@@ -765,6 +788,7 @@ export default function ProposalsLibrary({
                       onDownload={handleDownload}
                       onDelete={handleDelete}
                       onTitleChange={handleTitleChange}
+                      canEditRow={canEditRow}
                       titleBusyId={titleBusyId}
                       pinnedIds={pinnedIds}
                       onRowContextMenu={openRowMenu}
@@ -791,6 +815,7 @@ export default function ProposalsLibrary({
                     onDownload={handleDownload}
                     onDelete={handleDelete}
                     onTitleChange={handleTitleChange}
+                    canEditRow={canEditRow}
                     titleBusyId={titleBusyId}
                     pinnedIds={pinnedIds}
                     onRowContextMenu={openRowMenu}
@@ -834,6 +859,7 @@ export default function ProposalsLibrary({
                       onDelete={handleDelete}
                       onReopen={handleReopen}
                       onTitleChange={handleTitleChange}
+                      canEditRow={canEditRow}
                       titleBusyId={titleBusyId}
                       isClosedSection
                       pinnedIds={pinnedIds}
@@ -877,6 +903,7 @@ export default function ProposalsLibrary({
                       onDelete={handleDelete}
                       onReopen={handleReopen}
                       onTitleChange={handleTitleChange}
+                      canEditRow={canEditRow}
                       titleBusyId={titleBusyId}
                       isClosedSection
                       roundedBottom
@@ -1107,8 +1134,8 @@ function NewProjectNameDialog({ isDark, busy, onCancel, onCreate }) {
               border: "none",
               borderRadius: 8,
               padding: "9px 14px",
-              background: isDark ? t.accent : "#2F3B4C",
-              color: isDark ? t.accentText : "#fff",
+              background: t.ctaBg,
+              color: t.ctaText,
               cursor: busy || !name.trim() ? "default" : "pointer",
               fontFamily: fontSans,
               fontSize: 13,
@@ -1635,8 +1662,8 @@ function FilterGroup({ label, isDark, children }) {
 function FilterChip({ label, active, isDark, onClick }) {
   const t = getAppTheme(isDark);
   const highlight = isDark
-    ? { border: "#8FB0C8", bg: "rgba(143,176,200,0.22)", color: "#E2ECF4" }
-    : { border: "#87A9C4", bg: "rgba(135,169,196,0.28)", color: "#2C4A5E" };
+    ? { border: t.amber, bg: "rgba(243,182,100,0.18)", color: t.amber }
+    : { border: t.amber, bg: "#FFF3DE", color: t.navy };
   return (
     <button
       type="button"
@@ -1726,6 +1753,7 @@ function ProjectsTable({
   onDelete,
   onReopen,
   onTitleChange,
+  canEditRow = () => true,
   titleBusyId,
   isClosedSection = false,
   roundedBottom = false,
@@ -1793,6 +1821,7 @@ function ProjectsTable({
           </thead>
           <tbody>
             {rows.map((p) => {
+              const locked = !canEditRow(p);
               const pdfReady = crmCanDownloadPdf(p);
               const stageKey = normalizeCrmStage(p.stage);
               const likelihoodColor = crmLikelihoodColor(p.closeLikelihoodPct);
@@ -1821,7 +1850,7 @@ function ProjectsTable({
                       key={`${p.id}-${editableProjectTitle(p)}`}
                       defaultValue={editableProjectTitle(p)}
                       placeholder="Project name"
-                      disabled={titleBusyId === p.id || crmBusyId === p.id}
+                      disabled={locked || titleBusyId === p.id || crmBusyId === p.id}
                       title={[address !== "—" ? address : null, dealTypeHint !== "—" ? `Deal type: ${dealTypeHint}` : null]
                         .filter(Boolean)
                         .join(" · ") || "Project name — also used as proposal title"}
@@ -1851,7 +1880,7 @@ function ProjectsTable({
                       value={stageKey || ""}
                       options={stageOptions}
                       isDark={isDark}
-                      disabled={crmBusyId === p.id}
+                      disabled={locked || crmBusyId === p.id}
                       onChange={(val) => onCrmChange(p, { stage: val || null })}
                     />
                   </td>
@@ -1862,7 +1891,7 @@ function ProjectsTable({
                       key={`${p.id}-owner-${p.proposalOwner || ""}`}
                       defaultValue={p.proposalOwner || ""}
                       placeholder="Owner"
-                      disabled={crmBusyId === p.id}
+                      disabled={locked || crmBusyId === p.id}
                       onBlur={(e) => {
                         const val = e.target.value.trim();
                         if (val === (p.proposalOwner || "")) return;
@@ -1891,7 +1920,7 @@ function ProjectsTable({
                     <CloseDatePicker
                       proposal={p}
                       isDark={isDark}
-                      disabled={crmBusyId === p.id}
+                      disabled={locked || crmBusyId === p.id}
                       onChange={(patch) => onCrmChange(p, patch)}
                     />
                   </td>
@@ -1899,7 +1928,7 @@ function ProjectsTable({
                     <RevenueInput
                       proposal={p}
                       isDark={isDark}
-                      disabled={crmBusyId === p.id}
+                      disabled={locked || crmBusyId === p.id}
                       onSave={(val, manual) =>
                         onCrmChange(p, {
                           estimatedRevenue: val,
@@ -1911,7 +1940,7 @@ function ProjectsTable({
                   <td style={{ padding: CELL_PAD, verticalAlign: "middle" }}>
                     <select
                       value={p.closeLikelihoodPct ?? ""}
-                      disabled={crmBusyId === p.id}
+                      disabled={locked || crmBusyId === p.id}
                       title={Number.isFinite(p.closeLikelihoodPct) ? `${p.closeLikelihoodPct}%` : "Likelihood"}
                       onChange={(e) =>
                         onCrmChange(p, {
@@ -1935,7 +1964,7 @@ function ProjectsTable({
                   <td style={{ padding: CELL_PAD, verticalAlign: "middle" }}>
                     <select
                       value={displayPriority}
-                      disabled={crmBusyId === p.id}
+                      disabled={locked || crmBusyId === p.id}
                       title={
                         p.priorityManual
                           ? "Manual priority"
@@ -1966,7 +1995,7 @@ function ProjectsTable({
                   <td style={{ padding: CELL_PAD, verticalAlign: "middle" }}>
                     <select
                       value={dealTypeStored}
-                      disabled={crmBusyId === p.id}
+                      disabled={locked || crmBusyId === p.id}
                       title={dealTypeTitle}
                       onChange={(e) => onCrmChange(p, { dealType: e.target.value || null })}
                       style={crmSelectStyle(isDark, { minWidth: 0, width: "100%", maxWidth: "none", fontSize: 11 })}
@@ -1984,7 +2013,7 @@ function ProjectsTable({
                   <td style={{ padding: CELL_PAD, verticalAlign: "middle" }}>
                     <select
                       value={p.financing || ""}
-                      disabled={crmBusyId === p.id}
+                      disabled={locked || crmBusyId === p.id}
                       title="Project financing"
                       onChange={(e) => onCrmChange(p, { financing: e.target.value || null })}
                       style={crmSelectStyle(isDark, { minWidth: 0, width: "100%", maxWidth: "none", fontSize: 11 })}
@@ -2012,18 +2041,20 @@ function ProjectsTable({
                         disabled={!pdfReady || downloadingId === p.id}
                         onClick={() => onDownload(p)}
                       />
-                      {isClosedSection && onReopen ? (
+                      {isClosedSection && onReopen && !locked ? (
                         <button type="button" onClick={() => onReopen(p)} style={tableActionBtnStyle(isDark, "secondary")}>
                           ↩
                         </button>
                       ) : null}
-                      <TableIconButton
-                        isDark={isDark}
-                        icon="trash"
-                        tone="danger"
-                        title="Delete project"
-                        onClick={() => onDelete(p)}
-                      />
+                      {!locked ? (
+                        <TableIconButton
+                          isDark={isDark}
+                          icon="trash"
+                          tone="danger"
+                          title="Delete project"
+                          onClick={() => onDelete(p)}
+                        />
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -2116,13 +2147,15 @@ function StageSelect({ value, options, isDark, disabled, onChange }) {
                     setOpen(false);
                   }}
                   style={{
-                    display: "block",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
                     width: "100%",
                     textAlign: "left",
                     padding: "8px 10px",
                     border: "none",
-                    borderBottom: `1px solid ${isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)"}`,
-                    background: o.value ? optColors.bg : t.headBg,
+                    borderBottom: `1px solid ${t.border}`,
+                    background: active ? (o.value ? optColors.bg : t.headBg) : t.panel,
                     color: o.value ? optColors.text : t.subtle,
                     fontSize: 12,
                     fontFamily: fontSans,
@@ -2130,6 +2163,20 @@ function StageSelect({ value, options, isDark, disabled, onChange }) {
                     cursor: "pointer",
                   }}
                 >
+                  {o.value ? (
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        width: 7,
+                        height: 7,
+                        borderRadius: "50%",
+                        background: optColors.dot,
+                        flexShrink: 0,
+                      }}
+                    />
+                  ) : (
+                    <span style={{ width: 7, flexShrink: 0 }} />
+                  )}
                   {o.label}
                 </button>
               );
@@ -2154,9 +2201,9 @@ function StageSelect({ value, options, isDark, disabled, onChange }) {
         style={{
           width: "100%",
           textAlign: "left",
-          padding: "5px 22px 5px 6px",
+          padding: "5px 22px 5px 8px",
           borderRadius: 6,
-          border: `1px solid ${value ? colors.bg : t.border}`,
+          border: `1px solid ${value ? "transparent" : t.border}`,
           background: value ? colors.bg : t.inputBg,
           color: value ? colors.text : t.subtle,
           fontSize: 11,
@@ -2167,9 +2214,24 @@ function StageSelect({ value, options, isDark, disabled, onChange }) {
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
         }}
       >
-        {shortLabel || "—"}
+        {value ? (
+          <span
+            aria-hidden="true"
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: colors.dot,
+              flexShrink: 0,
+            }}
+          />
+        ) : null}
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{shortLabel || "—"}</span>
         <span
           aria-hidden="true"
           style={{

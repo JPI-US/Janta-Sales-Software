@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-const CHART_COLORS = ["#2F3B4C", "#D3A14A", "#2A9D8F", "#6F8096", "#B45309", "#4A6FA5", "#8B5CF6", "#C2410C"];
+const CHART_COLORS = ["#0B2545", "#F3B664", "#16A34A", "#3B82F6", "#8B5CF6", "#6B7A90", "#B26A00", "#EF4444"];
 
 export function chartPalette(isDark) {
   return isDark
@@ -10,9 +10,9 @@ export function chartPalette(isDark) {
 
 function chartText(isDark) {
   return {
-    title: isDark ? "#F3F4F6" : "#2F3B4C",
-    subtle: isDark ? "#9CA3AF" : "#6F8096",
-    grid: isDark ? "#333333" : "#E8ECF0",
+    title: isDark ? "#F4F6FA" : "#1A2233",
+    subtle: isDark ? "#9FB0C4" : "#6B7A90",
+    grid: isDark ? "#1E3350" : "#E3E8F0",
   };
 }
 
@@ -192,7 +192,7 @@ export function FunnelChart({ steps, pipelineSteps, outcomeSteps, isDark }) {
     if (step.tone === "followup") return isDark ? "#374151" : "#4A6380";
     const colors = isDark
       ? ["#E5E7EB", "#D1D5DB", "#C4C4C4", "#B8B8B8", "#A3A3A3", "#949494", "#858585", "#767676"]
-      : ["#2F3B4C", "#3D4F66", "#4A6380", "#5A7390", "#6F8096", "#8B7355", "#4A6380", "#5A7390"];
+      : ["#0B2545", "#13315C", "#3B82F6", "#F3B664", "#16A34A", "#8B5CF6", "#6B7A90", "#B26A00"];
     return colors[Math.min(index, colors.length - 1)];
   }
 

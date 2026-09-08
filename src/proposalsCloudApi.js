@@ -23,6 +23,12 @@ export async function listProposalsCloud(userId, { status } = {}) {
   return data.proposals || [];
 }
 
+export async function listAllProposalsCloud({ status } = {}) {
+  const q = status ? `?status=${encodeURIComponent(status)}` : "";
+  const data = await request(`/api/proposals${q}`);
+  return data.proposals || [];
+}
+
 export async function getProposalCloud(userId, proposalId) {
   const data = await request(`/api/users/${encodeURIComponent(userId)}/proposals/${encodeURIComponent(proposalId)}`);
   return data.proposal;

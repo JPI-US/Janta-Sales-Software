@@ -9,6 +9,8 @@ export default function AppShell({
   activeEmailTemplateId,
   userId,
   isAdmin,
+  canSalesReport,
+  canMarketingReport,
   sidebarRefreshKey,
   onNavigateProjects,
   onNavigateReports,
@@ -49,6 +51,8 @@ export default function AppShell({
         activeEmailTemplateId={activeEmailTemplateId}
         userId={userId}
         isAdmin={isAdmin}
+        canSalesReport={canSalesReport}
+        canMarketingReport={canMarketingReport}
         refreshKey={sidebarRefreshKey}
         onNavigateProjects={onNavigateProjects}
         onNavigateReports={onNavigateReports}

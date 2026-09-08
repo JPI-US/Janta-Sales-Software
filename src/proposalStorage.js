@@ -15,6 +15,7 @@ import {
   createProposalCloud,
   deleteProposalCloud,
   getProposalCloud,
+  listAllProposalsCloud,
   listProposalsCloud,
   readDraftCloud,
   upsertProposalCloud,
@@ -119,6 +120,18 @@ export async function listProposalsForUser(userOrKey, { status, userEmail } = {}
 
   if (status) return localDeduped.filter((p) => p.status === status);
   return localDeduped;
+}
+
+export async function listTeamProposals(userOrKey, { status, userEmail } = {}) {
+  const accountKey = normalizeAccountKey(userOrKey);
+  const mine = await listProposalsForUser(accountKey, { status, userEmail });
+  try {
+    const all = await listAllProposalsCloud({ status });
+    const others = (all || []).filter((p) => p?.userId && p.userId !== accountKey);
+    return dedupeProposalList(mergeProposalLists(mine, others));
+  } catch {
+    return mine;
+  }
 }
 
 export async function saveProposal({

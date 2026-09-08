@@ -57,22 +57,28 @@ export function normalizeCrmStage(stage) {
   return LEGACY_STAGE_MAP[stage] || stage;
 }
 
-/** Stage colors for table selects and badges — distinct hue per pipeline step. */
+const STAGE_DRAFT = { bg: "#EEF1F6", text: "#5B6B82", dot: "#94A3B8" };
+const STAGE_SENT = { bg: "#E7F0FF", text: "#1D4ED8", dot: "#3B82F6" };
+const STAGE_NEGOTIATION = { bg: "#FFF3DE", text: "#B26A00", dot: "#F3B664" };
+const STAGE_WON = { bg: "#E4F7EC", text: "#07794C", dot: "#16A34A" };
+const STAGE_LOST = { bg: "#FDE9E9", text: "#B42318", dot: "#EF4444" };
+
+/** Soft chips: bg + text + dot. Charts should use `dot`. */
 export const CRM_STAGE_COLORS = {
-  [CRM_STAGE_CREATED]: { bg: "#6B7280", text: "#FFFFFF" },
-  [CRM_STAGE_DRAFTING]: { bg: "#2563EB", text: "#FFFFFF" },
-  [CRM_STAGE_APPROVED]: { bg: "#06B6D4", text: "#FFFFFF" },
-  [CRM_STAGE_REVISION]: { bg: "#9333EA", text: "#FFFFFF" },
-  [CRM_STAGE_SENT]: { bg: "#DB2777", text: "#FFFFFF" },
-  [CRM_STAGE_NEGOTIATION]: { bg: "#D97706", text: "#FFFFFF" },
-  [CRM_STAGE_NEEDS_FOLLOW_UP]: { bg: "#EA580C", text: "#FFFFFF" },
-  [CRM_STAGE_SIGNED]: { bg: "#16A34A", text: "#FFFFFF" },
-  [CRM_STAGE_LEAD_LOST]: { bg: "#DC2626", text: "#FFFFFF" },
+  [CRM_STAGE_CREATED]: STAGE_DRAFT,
+  [CRM_STAGE_DRAFTING]: STAGE_DRAFT,
+  [CRM_STAGE_APPROVED]: STAGE_DRAFT,
+  [CRM_STAGE_REVISION]: STAGE_NEGOTIATION,
+  [CRM_STAGE_SENT]: STAGE_SENT,
+  [CRM_STAGE_NEGOTIATION]: STAGE_NEGOTIATION,
+  [CRM_STAGE_NEEDS_FOLLOW_UP]: STAGE_NEGOTIATION,
+  [CRM_STAGE_SIGNED]: STAGE_WON,
+  [CRM_STAGE_LEAD_LOST]: STAGE_LOST,
 };
 
 export function crmStageColor(stage) {
   const key = normalizeCrmStage(stage);
-  return CRM_STAGE_COLORS[key] || { bg: "#6F8096", text: "#FFFFFF" };
+  return CRM_STAGE_COLORS[key] || STAGE_DRAFT;
 }
 
 export const CRM_DEAL_TYPE_PILOT = "pilot";

@@ -3799,9 +3799,9 @@ export default function JantaProposal({
       {/* HEADER */}
       <div
         style={{
-          background: C.navy,
+          background: "#0B2545",
           padding: "14px 24px 12px",
-          boxShadow: `0 0 0 100vmax ${C.navy}`,
+          boxShadow: `0 0 0 100vmax #0B2545`,
           clipPath: "inset(0 -100vmax)",
           borderBottom: darkThemeActive ? `1px solid ${C.g200}` : "none",
         }}

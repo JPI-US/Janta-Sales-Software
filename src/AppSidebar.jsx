@@ -166,6 +166,8 @@ export default function AppSidebar({
   activeEmailTemplateId,
   userId,
   isAdmin,
+  canSalesReport,
+  canMarketingReport,
   refreshKey = 0,
   onNavigateProjects,
   onNavigateReports,
@@ -337,7 +339,7 @@ export default function AppSidebar({
               )
             }
           />
-          {isAdmin ? (
+          {canSalesReport ?? isAdmin ? (
             <SidebarNavButton
               theme={sidebar}
               expanded={expanded}
@@ -365,7 +367,7 @@ export default function AppSidebar({
                   onNavigateEmail,
                   onNewEmail,
                   onRefresh: onSidebarRefresh,
-                  isAdmin,
+                  isAdmin: Boolean(canMarketingReport ?? isAdmin),
                   onNavigateMedia,
                 }),
               )
@@ -389,7 +391,7 @@ export default function AppSidebar({
             onClick={onNavigateSocial}
             onContextMenu={(e) => showMenu(e, [{ label: "Open social campaigns", action: onNavigateSocial }])}
           />
-          {isAdmin ? (
+          {canMarketingReport ?? isAdmin ? (
             <SidebarNavButton
               theme={sidebar}
               expanded={expanded}

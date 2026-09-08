@@ -268,8 +268,8 @@ function MeetingLinksPanel({ isDark, settings, onSaved }) {
             padding: "10px 14px",
             borderRadius: 8,
             border: "none",
-            background: t.accent,
-            color: t.accentText,
+            background: t.ctaBg,
+            color: t.ctaText,
             fontWeight: 700,
             cursor: "pointer",
             fontFamily: fontSans,
@@ -277,7 +277,7 @@ function MeetingLinksPanel({ isDark, settings, onSaved }) {
         >
           Save meeting links
         </button>
-        {flash ? <span style={{ fontSize: 13, fontWeight: 600, color: t.accent }}>{flash}</span> : null}
+        {flash ? <span style={{ fontSize: 13, fontWeight: 600, color: t.positive }}>{flash}</span> : null}
       </div>
     </section>
   );

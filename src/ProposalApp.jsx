@@ -22,6 +22,14 @@ import {
   saveProposalCrmFields,
 } from "./proposalStorage.js";
 import { CRM_STAGE_CREATED } from "../shared/proposalCrmFields.js";
+import {
+  canAccessMarketingReport,
+  canAccessSalesReport,
+  canCreateMarketing,
+  canCreateProjects,
+  canEditOwnedRecord,
+  isAdminUser,
+} from "../shared/roles.js";
 import { confirmSignOut } from "./appIcons.jsx";
 import { runThemeTransition, themeTransitionClickOrigin } from "./themeTransition.js";
 import { initEmailStudioStore } from "./emailStudioStoreBridge.js";
@@ -104,7 +112,7 @@ export default function ProposalApp({
   onDarkModeChange,
 }) {
   const accountKey = proposalStorageKey(currentUser);
-  const isAdmin = Boolean(currentUser?.isAdmin);
+  const isAdmin = isAdminUser(currentUser);
   const savedNav = useRef(readNavState(accountKey)).current;
   const [view, setView] = useState(savedNav?.view === "editor" ? "editor" : "library");
   const [editorKey, setEditorKey] = useState(0);
@@ -212,11 +220,11 @@ export default function ProposalApp({
   }, [runBeforeNavigate, persistNav, bumpSidebarRefresh]);
 
   const openReports = useCallback(async () => {
-    if (!isAdmin) return;
+    if (!canAccessSalesReport(currentUser)) return;
     if (!(await runBeforeNavigate())) return;
     setView("reports");
     persistNav("reports", { id: null, title: "", snapshot: null });
-  }, [isAdmin, runBeforeNavigate, persistNav]);
+  }, [currentUser, runBeforeNavigate, persistNav]);
 
   const openCampaigns = useCallback(async () => {
     if (!(await runBeforeNavigate())) return;
@@ -226,14 +234,14 @@ export default function ProposalApp({
 
   const openMedia = useCallback(
     async (section = "overview") => {
-      if (!isAdmin) return;
+      if (!canAccessMarketingReport(currentUser)) return;
       if (!(await runBeforeNavigate())) return;
       const nextSection = typeof section === "string" && MARKETING_SECTIONS.has(section) ? section : "overview";
       setMarketingSection(nextSection);
       setView("media");
       persistNav("media", { id: null, title: "", snapshot: null }, { marketingSection: nextSection });
     },
-    [isAdmin, runBeforeNavigate, persistNav],
+    [currentUser, runBeforeNavigate, persistNav],
   );
 
   const openCalendar = useCallback(async () => {
@@ -256,6 +264,7 @@ export default function ProposalApp({
   }, [runBeforeNavigate, persistNav]);
 
   const requestNewProject = useCallback(async () => {
+    if (!canCreateProjects(currentUser)) return;
     if (!(await runBeforeNavigate())) return;
     setAutoDownloadPdf(false);
     setActiveEmailTemplateId(null);
@@ -265,10 +274,11 @@ export default function ProposalApp({
     bumpLibraryRefresh();
     bumpSidebarRefresh();
     persistNav("library", { id: null, title: "", snapshot: null });
-  }, [runBeforeNavigate, persistNav, bumpLibraryRefresh, bumpSidebarRefresh]);
+  }, [currentUser, runBeforeNavigate, persistNav, bumpLibraryRefresh, bumpSidebarRefresh]);
 
   const requestNewProjectInFolder = useCallback(
     async (folderId) => {
+      if (!canCreateProjects(currentUser)) return;
       if (!(await runBeforeNavigate())) return;
       setAutoDownloadPdf(false);
       setActiveEmailTemplateId(null);
@@ -279,20 +289,22 @@ export default function ProposalApp({
       bumpSidebarRefresh();
       persistNav("library", { id: null, title: "", snapshot: null });
     },
-    [runBeforeNavigate, persistNav, bumpLibraryRefresh, bumpSidebarRefresh],
+    [currentUser, runBeforeNavigate, persistNav, bumpLibraryRefresh, bumpSidebarRefresh],
   );
 
   const requestNewEmail = useCallback(async () => {
+    if (!canCreateMarketing(currentUser)) return;
     if (!(await runBeforeNavigate())) return;
     setActiveEmailTemplateId(null);
     setView("email");
     setPendingEmailFolderId(null);
     setPendingEmailCreate(true);
     persistNav("email", { id: null, title: "", snapshot: null });
-  }, [runBeforeNavigate, persistNav]);
+  }, [currentUser, runBeforeNavigate, persistNav]);
 
   const requestNewEmailInFolder = useCallback(
     async (folderId) => {
+      if (!canCreateMarketing(currentUser)) return;
       if (!(await runBeforeNavigate())) return;
       setActiveEmailTemplateId(null);
       setView("email");
@@ -300,7 +312,7 @@ export default function ProposalApp({
       setPendingEmailCreate(true);
       persistNav("email", { id: null, title: "", snapshot: null });
     },
-    [runBeforeNavigate, persistNav],
+    [currentUser, runBeforeNavigate, persistNav],
   );
 
   const openEmailTemplate = useCallback(
@@ -340,9 +352,10 @@ export default function ProposalApp({
       if (view === "editor" && record?.id === activeProposalRef.current?.id) return;
       if (!(await runBeforeNavigate())) return;
 
+      const ownerKey = record?.userId || accountKey;
       let full = record;
       if (record?.id && !record?.snapshot) {
-        full = await getProposalForUser(accountKey, record.id);
+        full = await getProposalForUser(ownerKey, record.id);
         if (!full) {
           window.alert("Could not load that project.");
           return;
@@ -353,6 +366,7 @@ export default function ProposalApp({
         id: full.id,
         title: full.title || deriveProposalTitle(full.snapshot),
         snapshot: full.snapshot,
+        ownerAccountKey: full.userId || ownerKey,
       };
       if (!next.snapshot) {
         window.alert("Could not load that project's saved data.");
@@ -376,10 +390,12 @@ export default function ProposalApp({
   const handleDeleteActiveProposal = useCallback(async () => {
     const id = activeProposalRef.current?.id;
     if (!id) return;
+    const ownerKey = activeProposalRef.current?.ownerAccountKey || accountKey;
+    if (!canEditOwnedRecord(currentUser, ownerKey, accountKey)) return;
     const label = activeProposalRef.current?.title || "this project";
     if (!window.confirm(`Delete "${label}"? This cannot be undone.`)) return;
     try {
-      await deleteProposal(id, accountKey);
+      await deleteProposal(id, ownerKey);
       bumpSidebarRefresh();
       setLibraryRefreshKey((k) => k + 1);
       setActiveProposal({ id: null, title: "", snapshot: null });
@@ -388,7 +404,7 @@ export default function ProposalApp({
     } catch (err) {
       window.alert(err.message || "Could not delete project.");
     }
-  }, [accountKey, bumpSidebarRefresh, persistNav]);
+  }, [accountKey, currentUser, bumpSidebarRefresh, persistNav]);
 
   const handleTogglePinActiveProposal = useCallback(() => {
     const id = activeProposalRef.current?.id;
@@ -399,6 +415,7 @@ export default function ProposalApp({
 
   const startNewProposal = useCallback(
     async (projectName, folderId = null) => {
+      if (!canCreateProjects(currentUser)) return false;
       const name = String(projectName || "").trim();
       if (!name) return false;
       if (creatingProposal.current) return false;
@@ -433,7 +450,7 @@ export default function ProposalApp({
         creatingProposal.current = false;
       }
     },
-    [accountKey, currentUser.email, runBeforeNavigate, bumpSidebarRefresh]
+    [accountKey, currentUser, runBeforeNavigate, bumpSidebarRefresh]
   );
 
   const startProposalFromClickUp = useCallback(
@@ -484,14 +501,16 @@ export default function ProposalApp({
 
   const handleAutosave = useCallback(
     async ({ snapshot }) => {
-      const { id, title } = activeProposalRef.current;
+      const { id, title, ownerAccountKey } = activeProposalRef.current;
       if (!id) return null;
+      const ownerKey = ownerAccountKey || accountKey;
+      if (!canEditOwnedRecord(currentUser, ownerKey, accountKey)) return null;
       if (autosaveInFlight.current) return autosaveInFlight.current;
 
       const run = (async () => {
         const nextTitle = deriveProposalTitle(snapshot) || title;
         const saved = await saveProposal({
-          userId: accountKey,
+          userId: ownerKey,
           id,
           title: nextTitle,
           snapshot,
@@ -501,6 +520,7 @@ export default function ProposalApp({
           id: saved.id,
           title: saved.title,
           snapshot: saved.snapshot,
+          ownerAccountKey: ownerKey,
         };
         setActiveProposal(next);
         bumpSidebarRefresh();
@@ -515,7 +535,7 @@ export default function ProposalApp({
         if (autosaveInFlight.current === run) autosaveInFlight.current = null;
       }
     },
-    [accountKey, currentUser.email, view, persistNav, bumpSidebarRefresh]
+    [accountKey, currentUser, view, persistNav, bumpSidebarRefresh]
   );
 
   const handleSidebarSignOut = useCallback(async () => {
@@ -547,8 +567,8 @@ export default function ProposalApp({
           minHeight: "100vh",
           display: "grid",
           placeItems: "center",
-          background: appDarkMode ? "#000000" : "#F3F4F6",
-          color: appDarkMode ? "#9CA3AF" : "#6F8096",
+          background: appDarkMode ? "#071525" : "#F4F6FA",
+          color: appDarkMode ? "#9FB0C4" : "#6B7A90",
           fontFamily: "Inter, system-ui, sans-serif",
           fontSize: 14,
         }}
@@ -585,10 +605,10 @@ export default function ProposalApp({
         userName={currentUser.name}
         userEmail={currentUser.email}
         onBack={openLibrary}
-        onOpenAnalytics={isAdmin ? () => openMedia("social") : undefined}
+        onOpenAnalytics={canAccessMarketingReport(currentUser) ? () => openMedia("social") : undefined}
       />
     );
-  } else if (view === "media" && isAdmin) {
+  } else if (view === "media" && canAccessMarketingReport(currentUser)) {
     page = (
       <MarketingReportPage
         isDark={appDarkMode}
@@ -604,7 +624,7 @@ export default function ProposalApp({
         }}
       />
     );
-  } else if (view === "reports" && isAdmin) {
+  } else if (view === "reports" && canAccessSalesReport(currentUser)) {
     page = (
       <ReportsDashboard
         isDark={appDarkMode}
@@ -634,7 +654,7 @@ export default function ProposalApp({
               minHeight: "100vh",
               display: "grid",
               placeItems: "center",
-              color: appDarkMode ? "#9CA3AF" : "#6F8096",
+              color: appDarkMode ? "#9FB0C4" : "#6B7A90",
               fontFamily: "Inter, system-ui, sans-serif",
               fontSize: 14,
             }}
@@ -662,30 +682,55 @@ export default function ProposalApp({
     );
   } else if (view === "library") {
     page = (
-      <>
-        <IncomingProjects onAccept={startProposalFromClickUp} />
-        <ProposalsLibrary
-          refreshKey={libraryRefreshKey}
-          userId={accountKey}
-          userName={currentUser.name}
-          userEmail={currentUser.email}
-          isDark={appDarkMode}
-          onOpenProposal={openProposalRecord}
-          onDownloadProposalPdf={handleDownloadPdfFromLibrary}
-          onNewProposal={startNewProposal}
-          onProposalUpdated={bumpSidebarRefresh}
-          onPinsChanged={bumpSidebarRefresh}
-          autoOpenCreate={pendingProjectCreate}
-          autoOpenCreateFolderId={pendingProjectFolderId}
-          onAutoOpenCreateHandled={() => {
-            setPendingProjectCreate(false);
-            setPendingProjectFolderId(null);
-          }}
-        />
-      </>
+      <ProposalsLibrary
+        refreshKey={libraryRefreshKey}
+        userId={accountKey}
+        userName={currentUser.name}
+        userEmail={currentUser.email}
+        isDark={appDarkMode}
+        onOpenProposal={openProposalRecord}
+        onDownloadProposalPdf={handleDownloadPdfFromLibrary}
+        onNewProposal={startNewProposal}
+        onProposalUpdated={bumpSidebarRefresh}
+        onPinsChanged={bumpSidebarRefresh}
+        autoOpenCreate={pendingProjectCreate}
+        autoOpenCreateFolderId={pendingProjectFolderId}
+        currentUser={currentUser}
+        onAutoOpenCreateHandled={() => {
+          setPendingProjectCreate(false);
+          setPendingProjectFolderId(null);
+        }}
+        topSlot={
+          <IncomingProjects
+            onAccept={startProposalFromClickUp}
+            isDark={appDarkMode}
+            currentUser={currentUser}
+          />
+        }
+      />
     );
   } else {
+    const editorReadOnly = !canEditOwnedRecord(
+      currentUser,
+      activeProposal.ownerAccountKey || accountKey,
+      accountKey
+    );
     page = (
+      <>
+        {editorReadOnly ? (
+          <div
+            style={{
+              padding: "10px 24px",
+              background: "#FFF3DE",
+              color: "#B26A00",
+              fontSize: 13,
+              fontFamily: "Inter, system-ui, sans-serif",
+              borderBottom: "1px solid #F3B664",
+            }}
+          >
+            Viewing someone else’s project — you can look, but only the owner or an admin can edit.
+          </div>
+        ) : null}
       <JantaProposal
         key={editorKey}
         currentUserId={accountKey}
@@ -694,10 +739,10 @@ export default function ProposalApp({
         savedProposalTitle={activeProposal.title}
         autoDownloadPdf={autoDownloadPdf}
         onAutoDownloadPdfDone={openLibrary}
-        onAutosaveProposal={handleAutosave}
+        onAutosaveProposal={editorReadOnly ? undefined : handleAutosave}
         onRegisterBeforeNavigate={registerBeforeNavigate}
         onOpenProposals={openLibrary}
-        onDeleteProposal={handleDeleteActiveProposal}
+        onDeleteProposal={editorReadOnly ? undefined : handleDeleteActiveProposal}
         onTogglePinProposal={handleTogglePinActiveProposal}
         proposalPinned={isProposalPinned(accountKey, activeProposal.id)}
         pinRefreshKey={sidebarRefreshKey}
@@ -707,6 +752,7 @@ export default function ProposalApp({
           if (typeof onDarkModeChange === "function") onDarkModeChange(next);
         }}
       />
+      </>
     );
   }
 
@@ -718,6 +764,8 @@ export default function ProposalApp({
       activeEmailTemplateId={activeEmailTemplateId}
       userId={accountKey}
       isAdmin={isAdmin}
+      canSalesReport={canAccessSalesReport(currentUser)}
+      canMarketingReport={canAccessMarketingReport(currentUser)}
       sidebarRefreshKey={sidebarRefreshKey}
       onNavigateProjects={openLibrary}
       onNavigateReports={openReports}

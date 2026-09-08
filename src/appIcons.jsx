@@ -398,14 +398,14 @@ export function RibbonSpacer() {
 }
 
 export const SIGN_OUT_RED = {
-  border: "1px solid rgba(220, 90, 90, 0.55)",
-  background: "linear-gradient(180deg, #B42318 0%, #8B1A1A 100%)",
+  border: "1px solid #EF4444",
+  background: "#B42318",
   color: "#FFF5F5",
 };
 
 export const SAVE_GREEN = {
-  border: "1px solid rgba(80, 180, 120, 0.55)",
-  background: "linear-gradient(180deg, #2A9D5C 0%, #1E7A45 100%)",
+  border: "1px solid #16A34A",
+  background: "#07794C",
   color: "#ECFDF5",
 };
 

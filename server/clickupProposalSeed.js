@@ -53,10 +53,43 @@ function loadConfig() {
     contactFieldMap: { ...DEFAULT_CONTACT_FIELD_MAP, ...lower(cfg.contactFieldMap) },
     contactRelationField: cfg.contactRelationField || null,
     contactNameFromTaskName: cfg.contactNameFromTaskName !== false,
+    ownerField: String(cfg.ownerField || "Deal Owner").trim() || "Deal Owner",
   };
 }
 
-function readCustomFieldValue(cf) {
+export function ownerFieldName() {
+  return loadConfig().ownerField;
+}
+
+export function findCustomField(fields, name) {
+  const n = String(name || "").trim().toLowerCase();
+  if (!n) return null;
+  return (fields || []).find((f) => String(f.name || "").trim().toLowerCase() === n) || null;
+}
+
+export function extractPeopleFromField(cf) {
+  if (!cf || cf.value == null || cf.value === "") return [];
+  const arr = Array.isArray(cf.value) ? cf.value : [cf.value];
+  const out = [];
+  for (const u of arr) {
+    if (u == null || u === "") continue;
+    if (typeof u === "object") {
+      const username = String(u.username || u.name || "").trim();
+      const email = String(u.email || "").trim();
+      if (!username && !email && u.id == null) continue;
+      out.push({
+        id: u.id != null ? String(u.id) : null,
+        email,
+        username,
+      });
+      continue;
+    }
+    out.push({ id: String(u), email: "", username: "" });
+  }
+  return out;
+}
+
+export function readCustomFieldValue(cf) {
   if (!cf) return null;
   const { type, value, type_config: tc } = cf;
   if (value == null || value === "") return null;

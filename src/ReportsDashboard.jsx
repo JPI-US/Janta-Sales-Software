@@ -69,9 +69,9 @@ function useTheme(isDark) {
     const base = getAppTheme(isDark);
     return {
       ...base,
-      gold: isDark ? "#D1D5DB" : "#7A5A12",
-      signed: isDark ? "#6EE7B7" : "#2A9D8F",
-      lost: isDark ? "#F87171" : "#B42318",
+      gold: base.amber,
+      signed: isDark ? "#86EFAC" : base.positive,
+      lost: isDark ? "#FCA5A5" : base.negative,
     };
   }, [isDark]);
 }
@@ -81,8 +81,8 @@ function useReportMetricColors(isDark, avgLikelihood) {
   return useMemo(
     () => ({
       // Revenue forecast — teal unweighted, brand light blue weighted
-      unweighted: isDark ? "#6EE7B7" : "#2A9D8F",
-      weighted: isDark ? "#8FB0C8" : "#87A9C4",
+      unweighted: t.stat.pipeline,
+      weighted: t.stat.sent,
       // Capacity — app teal (signed / success)
       capacity: t.signed,
       // Semantic CRM colors
@@ -95,7 +95,7 @@ function useReportMetricColors(isDark, avgLikelihood) {
       new: t.signed,
       volume: t.subtle,
     }),
-    [isDark, avgLikelihood, t.lost, t.signed, t.subtle, t.title]
+    [isDark, avgLikelihood, t.lost, t.signed, t.subtle, t.title, t.stat]
   );
 }
 
@@ -126,16 +126,17 @@ function StatPill({ label, value, isDark, accent }) {
   return (
     <div
       style={{
-        padding: "12px 14px",
+        padding: "12px 14px 12px 16px",
         borderRadius: 10,
-        background: t.headBg,
-        border: `1px solid ${accent || t.border}`,
+        background: t.panel,
+        border: `1px solid ${t.border}`,
+        borderLeft: `3px solid ${accent || t.amber}`,
         flex: "1 1 140px",
         minWidth: 0,
       }}
     >
       <div style={type.label}>{label}</div>
-      <div style={{ ...type.valueMd, color: accent || t.title }}>{value}</div>
+      <div style={{ ...type.valueMd, color: t.title }}>{value}</div>
     </div>
   );
 }
@@ -695,7 +696,7 @@ function OutcomeBadge({ outcome, isDark }) {
         borderRadius: 999,
         fontSize: 11,
         fontWeight: 700,
-        background: signed ? (isDark ? "#14332E" : "#E6F5F1") : t.errorBg,
+        background: signed ? t.successBg : t.errorBg,
         color: signed ? t.signed : t.lost,
       }}
     >
@@ -786,7 +787,7 @@ export default function ReportsDashboard({ isDark, userName, userEmail, onBack }
         label: stageKey === "unset" ? "Unset" : s?.label || crmStageLabel(stageKey),
         value: s?.revenue || 0,
         weightedValue: s?.weightedRevenue ?? 0,
-        color: stageKey === "unset" ? (isDark ? "#6B7280" : "#9CA3AF") : crmStageColor(stageKey).bg,
+        color: stageKey === "unset" ? (isDark ? "#6B7280" : "#94A3B8") : crmStageColor(stageKey).dot,
       };
     });
     const stageItems = systemStages.map(({ stageKey, label, value, color }) => {
@@ -1000,9 +1001,9 @@ export default function ReportsDashboard({ isDark, userName, userEmail, onBack }
                 onClick={() => changeReportView(o.value)}
                 style={{
                   ...chipBtn(isDark),
-                  background: reportView === o.value ? t.accent : t.inputBg,
-                  color: reportView === o.value ? t.accentText : t.subtle,
-                  border: `1px solid ${reportView === o.value ? t.accent : t.border}`,
+                  background: reportView === o.value ? t.navy : t.inputBg,
+                  color: reportView === o.value ? "#FFFFFF" : t.subtle,
+                  border: `1px solid ${reportView === o.value ? t.amber : t.border}`,
                 }}
               >
                 {o.label}
@@ -1089,10 +1090,10 @@ export default function ReportsDashboard({ isDark, userName, userEmail, onBack }
                   compact
                 >
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 20 }}>
-                    <StatPill isDark={isDark} label="New this period" value={periodSummary?.newCount ?? 0} accent={metricColors.new} />
-                    <StatPill isDark={isDark} label="Signed" value={periodSummary?.signedCount ?? 0} accent={metricColors.signed} />
-                    <StatPill isDark={isDark} label="Lead lost" value={periodSummary?.lostCount ?? 0} accent={metricColors.lost} />
-                    <StatPill isDark={isDark} label="Win rate" value={pct(periodSummary?.winRate)} accent={metricColors.likelihood} />
+                    <StatPill isDark={isDark} label="New this period" value={periodSummary?.newCount ?? 0} accent={t.stat.pipeline} />
+                    <StatPill isDark={isDark} label="Signed" value={periodSummary?.signedCount ?? 0} accent={t.stat.winRate} />
+                    <StatPill isDark={isDark} label="Lead lost" value={periodSummary?.lostCount ?? 0} accent={t.negative} />
+                    <StatPill isDark={isDark} label="Win rate" value={pct(periodSummary?.winRate)} accent={t.stat.winRate} />
                   </div>
                   <FunnelChart isDark={isDark} steps={chartData.steps} />
                 </Panel>
@@ -1114,9 +1115,9 @@ export default function ReportsDashboard({ isDark, userName, userEmail, onBack }
                         onClick={() => setTableTab(key)}
                         style={{
                           ...chipBtn(isDark),
-                          background: tableTab === key ? t.accent : t.inputBg,
-                          color: tableTab === key ? t.accentText : t.subtle,
-                          border: `1px solid ${tableTab === key ? t.accent : t.border}`,
+                          background: tableTab === key ? t.navy : t.inputBg,
+                          color: tableTab === key ? "#FFFFFF" : t.subtle,
+                          border: `1px solid ${tableTab === key ? t.amber : t.border}`,
                         }}
                       >
                         {label}
@@ -1165,6 +1166,7 @@ export default function ReportsDashboard({ isDark, userName, userEmail, onBack }
 }
 
 function PipelinePanel({ report, isDark, periodLabel, metricColors }) {
+  const t = useTheme(isDark);
   const summary = report.summary;
   const totalKw = summary.totalOpenSystemKw ?? 0;
   const kwDisplay = totalKw > 0 ? formatSystemSize(totalKw) : "—";
@@ -1181,8 +1183,8 @@ function PipelinePanel({ report, isDark, periodLabel, metricColors }) {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         <StatPill isDark={isDark} label="Weighted" value={formatUsdCompact(summary.pipelineWeighted)} accent={metricColors.weighted} />
         <StatPill isDark={isDark} label="Unweighted" value={formatUsdCompact(summary.pipelineUnweighted)} accent={metricColors.unweighted} />
-        <StatPill isDark={isDark} label="Open deals" value={summary.openOpportunities} />
-        <StatPill isDark={isDark} label="Capacity" value={kwDisplay} accent={metricColors.capacity} />
+        <StatPill isDark={isDark} label="Open deals" value={summary.openOpportunities} accent={t.stat.pipeline} />
+        <StatPill isDark={isDark} label="Capacity" value={kwDisplay} accent={t.stat.timeToClose} />
         <StatPill
           isDark={isDark}
           label="Likelihood"

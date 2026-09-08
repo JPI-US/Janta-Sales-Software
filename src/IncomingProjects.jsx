@@ -1,22 +1,34 @@
-// src/IncomingProjects.jsx
-//
-// Drop-in panel that lists pending ClickUp deals with Accept / Dismiss.
-// Mount it in the library view and pass onAccept={startProposalFromClickUp}.
-//
-//   <IncomingProjects onAccept={startProposalFromClickUp} />
-//
-// Accept -> creates + opens a proposal seeded from the deal. Dismiss -> hides it.
-
 import React, { useCallback, useEffect, useState } from "react";
 import { getIncomingProjects, acceptProject, dismissProject, pollClickUp, getClickUpStatus } from "./clickupApi.js";
+import { fontSans, getAppTheme } from "./appTheme.js";
 
-export default function IncomingProjects({ onAccept }) {
+function ownerLabel(owner) {
+  return String(owner?.username || owner?.email || "").trim();
+}
+
+function ownersText(owners) {
+  const names = (owners || []).map(ownerLabel).filter(Boolean);
+  if (!names.length) return "No owner set";
+  return names.length === 1 ? `Owner: ${names[0]}` : `Owners: ${names.join(", ")}`;
+}
+
+function sizeLabel(kw) {
+  if (kw == null || kw === "") return null;
+  const n = Number(kw);
+  if (!Number.isFinite(n)) return `${kw} kW`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 1 : 2)} MW`;
+  return `${n} kW`;
+}
+
+export default function IncomingProjects({ onAccept, isDark = false, currentUser = null }) {
+  const t = getAppTheme(isDark);
+  const isAdmin = Boolean(currentUser?.isAdmin);
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState("");
   const [configured, setConfigured] = useState(true);
-  const [confirming, setConfirming] = useState(null);
+  const [dialog, setDialog] = useState(null);
 
   const load = useCallback(async () => {
     setError("");
@@ -60,11 +72,11 @@ export default function IncomingProjects({ onAccept }) {
       try {
         const { proposalSeed } = await acceptProject(project.id);
         setProjects((prev) => prev.filter((p) => p.id !== project.id));
-        setConfirming(null);
+        setDialog(null);
         if (typeof onAccept === "function") await onAccept(proposalSeed);
       } catch (err) {
         setError(err.message);
-        setConfirming(null);
+        setDialog(null);
       } finally {
         setBusyId(null);
       }
@@ -73,6 +85,10 @@ export default function IncomingProjects({ onAccept }) {
   );
 
   const handleDismiss = useCallback(async (project) => {
+    if (!project.canDismiss) {
+      setDialog({ type: "blocked", project });
+      return;
+    }
     setBusyId(project.id);
     try {
       await dismissProject(project.id);
@@ -84,9 +100,26 @@ export default function IncomingProjects({ onAccept }) {
     }
   }, []);
 
-  if (!configured) return null; // hide panel entirely when ClickUp isn't set up
+  function onAddClick(project) {
+    if (!project.canAccept) {
+      setDialog({ type: "blocked", project });
+      return;
+    }
+    setDialog({ type: "confirm", project });
+  }
+
+  if (!configured) return null;
+  const S = styles(t);
+
   if (loading && projects.length === 0) {
-    return <div style={S.wrap}><div style={S.head}><span style={S.title}>Incoming from ClickUp</span></div><div style={S.empty}>Loading…</div></div>;
+    return (
+      <div style={S.wrap}>
+        <div style={S.head}>
+          <span style={S.title}>Incoming from ClickUp</span>
+        </div>
+        <div style={S.empty}>Loading…</div>
+      </div>
+    );
   }
 
   return (
@@ -98,89 +131,203 @@ export default function IncomingProjects({ onAccept }) {
         </button>
       </div>
 
-      {error && <div style={S.error}>{error}</div>}
+      {error ? <div style={S.error}>{error}</div> : null}
 
       {projects.length === 0 ? (
         <div style={S.empty}>No new projects. New ClickUp deals will appear here.</div>
       ) : (
         <ul style={S.list}>
-          {projects.map((p) => (
-            <li key={p.id} style={S.row}>
-              <div style={{ minWidth: 0 }}>
-                <div style={S.name}>{p.name}</div>
-                <div style={S.meta}>
-                  {p.clickupStatus ? `${p.clickupStatus} · ` : ""}
-                  {p.clickupCreatedAt ? new Date(p.clickupCreatedAt).toLocaleDateString() : ""}
+          {projects.map((p) => {
+            const meta = [p.projectType, sizeLabel(p.systemSizeKw), p.clickupStatus, p.clickupCreatedAt ? new Date(p.clickupCreatedAt).toLocaleDateString() : ""]
+              .filter(Boolean)
+              .join(" · ");
+            return (
+              <li key={p.id} style={S.row}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={S.name}>{p.name}</div>
+                  <div style={S.owners}>{ownersText(p.owners)}</div>
+                  {p.tags?.length ? (
+                    <div style={S.tags}>
+                      {p.tags.map((tag) => (
+                        <span
+                          key={tag.name}
+                          style={{
+                            ...S.tag,
+                            background: tag.bg || t.headBg,
+                            color: tag.fg || t.title,
+                          }}
+                        >
+                          {tag.name}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {meta ? <div style={S.meta}>{meta}</div> : null}
                 </div>
-              </div>
-              <div style={S.actions}>
-                <button type="button" style={S.accept} disabled={busyId === p.id} onClick={() => setConfirming(p)}>
-                  {busyId === p.id ? "…" : "Add project"}
-                </button>
-                <button type="button" style={S.dismiss} disabled={busyId === p.id} onClick={() => handleDismiss(p)}>
-                  Dismiss
-                </button>
-              </div>
-            </li>
-          ))}
+                <div style={S.actions}>
+                  <button type="button" style={S.accept} disabled={busyId === p.id} onClick={() => onAddClick(p)}>
+                    {busyId === p.id ? "…" : "Add project"}
+                  </button>
+                  {p.canDismiss ? (
+                    <button type="button" style={S.dismiss} disabled={busyId === p.id} onClick={() => handleDismiss(p)}>
+                      Dismiss
+                    </button>
+                  ) : null}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
 
-      {confirming && (
+      {dialog ? (
         <div
           style={S.overlay}
           role="dialog"
           aria-modal="true"
-          aria-label="Confirm project ownership"
-          onClick={() => busyId === null && setConfirming(null)}
+          aria-label={dialog.type === "blocked" ? "Cannot add project" : "Confirm project ownership"}
+          onClick={() => busyId === null && setDialog(null)}
         >
           <div style={S.modal} onClick={(e) => e.stopPropagation()}>
-            <div style={S.modalTitle}>Add “{confirming.name}”?</div>
-            <div style={S.modalBody}>
-              By clicking Continue, you confirm that you are the owner of this project.
-            </div>
-            <div style={S.modalActions}>
-              <button
-                type="button"
-                style={S.dismiss}
-                disabled={busyId !== null}
-                onClick={() => setConfirming(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                style={S.accept}
-                disabled={busyId !== null}
-                onClick={() => handleAccept(confirming)}
-              >
-                {busyId === confirming.id ? "Adding…" : "Continue"}
-              </button>
-            </div>
+            {dialog.type === "blocked" ? (
+              <>
+                <div style={S.modalTitle}>Can’t add “{dialog.project.name}”</div>
+                <div style={S.modalBody}>{dialog.project.blockReason || "Please contact an admin or update the Deal Owner in ClickUp."}</div>
+                <div style={S.modalActions}>
+                  <button type="button" style={S.accept} onClick={() => setDialog(null)}>
+                    OK
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={S.modalTitle}>Add “{dialog.project.name}”?</div>
+                <div style={S.modalBody}>
+                  {isAdmin && !(dialog.project.owners || []).some(ownerLabel)
+                    ? "You’re signed in as an admin. This ClickUp deal has no Deal Owner set."
+                    : isAdmin
+                      ? `You’re signed in as an admin. ClickUp owners: ${ownersText(dialog.project.owners)}.`
+                      : "By clicking Continue, you confirm that you are the owner of this project."}
+                </div>
+                <div style={S.modalActions}>
+                  <button type="button" style={S.dismiss} disabled={busyId !== null} onClick={() => setDialog(null)}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    style={S.accept}
+                    disabled={busyId !== null}
+                    onClick={() => handleAccept(dialog.project)}
+                  >
+                    {busyId === dialog.project.id ? "Adding…" : "Continue"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
 
-const S = {
-  wrap: { border: "1px solid #E2E8F0", borderRadius: 12, padding: 16, marginBottom: 20, background: "#fff" },
-  head: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
-  title: { fontWeight: 600, fontSize: 15 },
-  refresh: { fontSize: 13, padding: "6px 12px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#F8FAFC", cursor: "pointer" },
-  error: { color: "#B42318", fontSize: 13, marginBottom: 10 },
-  empty: { color: "#64748B", fontSize: 14, padding: "8px 0" },
-  list: { listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 },
-  row: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", border: "1px solid #EEF2F6", borderRadius: 10, background: "#FBFCFE" },
-  name: { fontWeight: 500, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  meta: { fontSize: 12, color: "#64748B", marginTop: 2 },
-  actions: { display: "flex", gap: 8, flexShrink: 0 },
-  accept: { fontSize: 13, padding: "6px 14px", borderRadius: 8, border: "none", background: "#16A34A", color: "#fff", cursor: "pointer" },
-  dismiss: { fontSize: 13, padding: "6px 12px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#fff", color: "#475569", cursor: "pointer" },
-  overlay: { position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 },
-  modal: { background: "#fff", borderRadius: 12, padding: 20, width: "100%", maxWidth: 420, boxShadow: "0 12px 32px rgba(15,23,42,0.25)" },
-  modalTitle: { fontWeight: 600, fontSize: 16, marginBottom: 8 },
-  modalBody: { fontSize: 14, color: "#475569", lineHeight: 1.5, marginBottom: 18 },
-  modalActions: { display: "flex", justifyContent: "flex-end", gap: 8 },
-};
+function styles(t) {
+  return {
+    wrap: {
+      border: `1px solid ${t.border}`,
+      borderRadius: 12,
+      padding: 16,
+      marginBottom: 20,
+      background: t.panel,
+      fontFamily: fontSans,
+    },
+    head: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12 },
+    title: { fontWeight: 600, fontSize: 15, color: t.title },
+    refresh: {
+      fontSize: 13,
+      padding: "6px 12px",
+      borderRadius: 8,
+      border: `1px solid ${t.border}`,
+      background: t.headBg,
+      color: t.title,
+      cursor: "pointer",
+      fontFamily: fontSans,
+    },
+    error: {
+      color: t.errorText,
+      background: t.errorBg,
+      border: `1px solid ${t.errorBorder}`,
+      borderRadius: 8,
+      fontSize: 13,
+      marginBottom: 10,
+      padding: "8px 10px",
+    },
+    empty: { color: t.subtle, fontSize: 14, padding: "8px 0" },
+    list: { listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 },
+    row: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+      padding: "12px 14px",
+      border: `1px solid ${t.border}`,
+      borderRadius: 10,
+      background: t.headBg,
+    },
+    name: { fontWeight: 600, fontSize: 14, color: t.title, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+    owners: { fontSize: 12, color: t.subtle, marginTop: 3 },
+    tags: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 },
+    tag: {
+      fontSize: 11,
+      fontWeight: 600,
+      padding: "2px 8px",
+      borderRadius: 999,
+      lineHeight: 1.4,
+    },
+    meta: { fontSize: 12, color: t.subtle, marginTop: 6 },
+    actions: { display: "flex", gap: 8, flexShrink: 0 },
+    accept: {
+      fontSize: 13,
+      padding: "6px 14px",
+      borderRadius: 8,
+      border: "none",
+      background: t.ctaBg,
+      color: t.ctaText,
+      cursor: "pointer",
+      fontWeight: 600,
+      fontFamily: fontSans,
+    },
+    dismiss: {
+      fontSize: 13,
+      padding: "6px 12px",
+      borderRadius: 8,
+      border: `1px solid ${t.border}`,
+      background: t.panel,
+      color: t.subtle,
+      cursor: "pointer",
+      fontFamily: fontSans,
+    },
+    overlay: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(11,37,69,0.45)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 1000,
+      padding: 16,
+    },
+    modal: {
+      background: t.panel,
+      borderRadius: 12,
+      padding: 20,
+      width: "100%",
+      maxWidth: 420,
+      boxShadow: "0 12px 32px rgba(11,37,69,0.25)",
+      border: `1px solid ${t.border}`,
+    },
+    modalTitle: { fontWeight: 600, fontSize: 16, marginBottom: 8, color: t.title },
+    modalBody: { fontSize: 14, color: t.subtle, lineHeight: 1.5, marginBottom: 18 },
+    modalActions: { display: "flex", justifyContent: "flex-end", gap: 8 },
+  };
+}

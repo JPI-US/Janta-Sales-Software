@@ -97,16 +97,17 @@ function StatPill({ label, value, isDark, accent }) {
   return (
     <div
       style={{
-        padding: "14px 16px",
+        padding: "14px 16px 14px 16px",
         borderRadius: 10,
-        background: t.headBg,
-        border: `1px solid ${accent || t.border}`,
+        background: t.panel,
+        border: `1px solid ${t.border}`,
+        borderLeft: `3px solid ${accent || t.amber}`,
         flex: "1 1 160px",
         minWidth: 0,
       }}
     >
       <div style={type.label}>{label}</div>
-      <div style={{ ...type.valueMd, color: accent || t.title }}>{value}</div>
+      <div style={{ ...type.valueMd, color: t.title }}>{value}</div>
     </div>
   );
 }
@@ -114,20 +115,20 @@ function StatPill({ label, value, isDark, accent }) {
 function StatusBadge({ channel, isDark }) {
   const t = useTheme(isDark);
   let label = "Demo";
-  let bg = isDark ? "#2A2418" : "#FFF7ED";
-  let color = isDark ? "#FBBF24" : "#B45309";
+  let bg = isDark ? "rgba(243,182,100,0.16)" : "#FFF3DE";
+  let color = isDark ? t.amber : "#B26A00";
 
   if (channel.live) {
     label = "Live";
-    bg = isDark ? "#14332E" : "#E6F5F1";
-    color = isDark ? "#6EE7B7" : "#1F7A6C";
+    bg = t.successBg;
+    color = t.successText || t.positive;
   } else if (channel.error) {
     label = "Error";
     bg = t.errorBg;
     color = t.lost || "#B42318";
   } else if (!channel.demo && !channel.configured) {
     label = "Not connected";
-    bg = isDark ? "#1A1A1A" : "#F3F4F6";
+    bg = isDark ? "#0B1A2E" : "#F4F6FA";
     color = t.subtle;
   }
 
