@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { getIncomingProjects, acceptProject, dismissProject, pollClickUp, getClickUpStatus } from "./clickupApi.js";
+import { isAdminUser } from "../shared/roles.js";
 import { fontSans, getAppTheme } from "./appTheme.js";
 
 function ownerLabel(owner) {
@@ -22,7 +23,7 @@ function sizeLabel(kw) {
 
 export default function IncomingProjects({ onAccept, isDark = false, currentUser = null }) {
   const t = getAppTheme(isDark);
-  const isAdmin = Boolean(currentUser?.isAdmin);
+  const isAdmin = isAdminUser(currentUser);
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState(null);
@@ -71,9 +72,16 @@ export default function IncomingProjects({ onAccept, isDark = false, currentUser
       setError("");
       try {
         const { proposalSeed } = await acceptProject(project.id);
-        setProjects((prev) => prev.filter((p) => p.id !== project.id));
         setDialog(null);
-        if (typeof onAccept === "function") await onAccept(proposalSeed);
+        // The row stays until the proposal actually exists -- accepting the
+        // project is confirmed server-side by onAccept, not here.
+        const created =
+          typeof onAccept === "function" ? await onAccept(proposalSeed, { projectId: project.id }) : false;
+        if (created) {
+          setProjects((prev) => prev.filter((p) => p.id !== project.id));
+        } else {
+          setError("The proposal was not created, so this project is still in the queue.");
+        }
       } catch (err) {
         setError(err.message);
         setDialog(null);

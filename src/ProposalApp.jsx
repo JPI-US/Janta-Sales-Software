@@ -2,6 +2,7 @@
 import JantaProposal from "../janta-proposal-generator-v3 (1).jsx";
 import ProposalsLibrary from "./ProposalsLibrary.jsx";
 import IncomingProjects from "./IncomingProjects.jsx";
+import { confirmAcceptProject } from "./clickupApi.js";
 import ReportsDashboard from "./ReportsDashboard.jsx";
 import EmailCampaignsPage from "./EmailCampaignsPage.jsx";
 import SocialCampaignsPage from "./SocialCampaignsPage.jsx";
@@ -453,8 +454,12 @@ export default function ProposalApp({
     [accountKey, currentUser, runBeforeNavigate, bumpSidebarRefresh]
   );
 
+  // `projectId` is set when this came from the ClickUp queue. Ordering matters:
+  // the proposal must exist on the server before the queue row is marked
+  // accepted, otherwise a failed save leaves a row claiming a proposal that
+  // was never created (with proposalId permanently null).
   const startProposalFromClickUp = useCallback(
-    async (seed) => {
+    async (seed, { projectId = null } = {}) => {
       if (!seed) return false;
       if (creatingProposal.current) return false;
       if (!(await runBeforeNavigate())) return false;
@@ -468,14 +473,25 @@ export default function ProposalApp({
           snapshot,
           title: deriveProposalTitle(snapshot),
           userEmail: currentUser.email,
+          // Do not accept the project on the strength of a local-only write.
+          requireCloud: Boolean(projectId),
         });
-        await saveProposalCrmFields({
-          userId: accountKey,
-          id: newId,
-          userEmail: currentUser.email,
-          stage: CRM_STAGE_CREATED,
-          proposalOwner: currentUser.name || currentUser.username || currentUser.email || null,
-        });
+        if (projectId) {
+          await confirmAcceptProject(projectId, saved.id || newId);
+        }
+        // Secondary write: the proposal already exists and the queue row is
+        // recorded, so a failure here must not undo either.
+        try {
+          await saveProposalCrmFields({
+            userId: accountKey,
+            id: newId,
+            userEmail: currentUser.email,
+            stage: CRM_STAGE_CREATED,
+            proposalOwner: currentUser.name || currentUser.username || currentUser.email || null,
+          });
+        } catch (err) {
+          console.warn("[proposals] could not set initial CRM fields:", err.message);
+        }
         await clearSessionDraft(accountKey);
         const next = {
           id: saved.id,

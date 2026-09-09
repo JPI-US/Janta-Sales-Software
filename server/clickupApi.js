@@ -2,7 +2,7 @@
 // Chained handler like proposalsApi.js. Mount in server/apiHandler.js.
 
 import "./loadEnv.js";
-import { send } from "./httpUtils.js";
+import { readBody, send } from "./httpUtils.js";
 import { authenticateRequest } from "./auth/sessions.js";
 import { DEFAULT_AUTH_DATA_DIR } from "./auth/userStore.js";
 import {
@@ -98,11 +98,18 @@ export function createClickUpApiHandler({
       return send(res, 200, { projects });
     }
 
+    // Step 1 of accept: owner check + build the seed. Deliberately does NOT mutate
+    // the queue row -- the client creates the proposal first, then calls
+    // /accept/confirm below. Marking the row accepted here would leave the queue
+    // claiming a proposal that does not exist if proposal creation then failed.
     const acceptMatch = pathname.match(/^\/api\/clickup\/incoming\/([^/]+)\/accept$/);
     if (req.method === "POST" && acceptMatch) {
       const id = decodeURIComponent(acceptMatch[1]);
       const existing = findProject(dataDir, id);
       if (!existing) return send(res, 404, { error: "Project not found" });
+      if (existing.status === "accepted") {
+        return send(res, 409, { error: "This project has already been accepted." });
+      }
 
       const { owners, task } = await liveOwners(dataDir, id, ownersFromProject(existing));
       if (!canUserTakeProject(session.user, owners)) {
@@ -114,12 +121,6 @@ export function createClickUpApiHandler({
         email: session.user.email || null,
         phone: session.user.phone || null,
       };
-      const updated = updateIncoming(dataDir, id, {
-        status: "accepted",
-        acceptedBy: preparedBy.email || preparedBy.name,
-        acceptedAt: new Date().toISOString(),
-      });
-      if (!updated) return send(res, 404, { error: "Project not found" });
 
       let contactTask = null;
       try {
@@ -130,9 +131,41 @@ export function createClickUpApiHandler({
       } catch (err) {
         console.warn("[clickup] accept contact fetch failed:", err.message);
       }
-      const seedSource = task || { name: updated.name, custom_fields: updated.customFields || [] };
+      const seedSource = task || { name: existing.name, custom_fields: existing.customFields || [] };
       const proposalSeed = buildProposalSeedFromTask(seedSource, { preparedBy, contactTask });
-      return send(res, 200, { project: publicProject(updated, session.user), proposalSeed });
+      return send(res, 200, { project: publicProject(existing, session.user), proposalSeed });
+    }
+
+    // Step 2 of accept: the proposal now exists, so record it against the queue row.
+    const confirmMatch = pathname.match(/^\/api\/clickup\/incoming\/([^/]+)\/accept\/confirm$/);
+    if (req.method === "POST" && confirmMatch) {
+      const id = decodeURIComponent(confirmMatch[1]);
+      const existing = findProject(dataDir, id);
+      if (!existing) return send(res, 404, { error: "Project not found" });
+      if (existing.status === "accepted") {
+        return send(res, 409, {
+          error: "This project has already been accepted.",
+          proposalId: existing.proposalId || null,
+        });
+      }
+
+      const { owners } = await liveOwners(dataDir, id, ownersFromProject(existing));
+      if (!canUserTakeProject(session.user, owners)) {
+        return send(res, 403, { error: OWNER_BLOCK_MESSAGE });
+      }
+
+      const body = await readBody(req);
+      const proposalId = String(body?.proposalId || "").trim();
+      if (!proposalId) return send(res, 400, { error: "proposalId is required" });
+
+      const updated = updateIncoming(dataDir, id, {
+        status: "accepted",
+        proposalId,
+        acceptedBy: session.user.email || session.user.name || session.user.username || null,
+        acceptedAt: new Date().toISOString(),
+      });
+      if (!updated) return send(res, 404, { error: "Project not found" });
+      return send(res, 200, { project: publicProject(updated, session.user) });
     }
 
     const dismissMatch = pathname.match(/^\/api\/clickup\/incoming\/([^/]+)\/dismiss$/);

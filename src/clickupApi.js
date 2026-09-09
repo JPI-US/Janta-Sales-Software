@@ -16,7 +16,15 @@ export const getClickUpStatus = () => request("/api/clickup/status");
 export const pollClickUp = () => request("/api/clickup/poll", { method: "POST" });
 export const getIncomingProjects = (status = "pending") =>
   request(`/api/clickup/incoming${status ? `?status=${encodeURIComponent(status)}` : ""}`);
+/** Step 1: owner check + proposal seed. Does not change the queue row. */
 export const acceptProject = (id) =>
   request(`/api/clickup/incoming/${encodeURIComponent(id)}/accept`, { method: "POST", body: JSON.stringify({}) });
+
+/** Step 2: the proposal exists -- record it against the queue row. */
+export const confirmAcceptProject = (id, proposalId) =>
+  request(`/api/clickup/incoming/${encodeURIComponent(id)}/accept/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ proposalId }),
+  });
 export const dismissProject = (id) =>
   request(`/api/clickup/incoming/${encodeURIComponent(id)}/dismiss`, { method: "POST", body: JSON.stringify({}) });

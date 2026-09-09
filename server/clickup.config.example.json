@@ -1,8 +1,8 @@
 {
   "//": "Copy to server/clickup.config.json. Keys are case-insensitive ClickUp field names.",
   "ownerField": "Deal Owner",
+  "//fieldMap": "Contact Person is intentionally left unmapped: on the live deals list it holds an AI-written summary, not a name. Map it only once it holds real contact data.",
   "fieldMap": {
-    "Contact Person": "custName",
     "Project Size (KW)": "systemSizeKw"
   },
   "//future": "When the contacts list is connected, set contactRelationField to the deal's relationship field name and map the contact task's fields below.",

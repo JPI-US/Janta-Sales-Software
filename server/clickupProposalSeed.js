@@ -11,10 +11,14 @@ import { SNAPSHOT_VERSION } from "../src/proposalSnapshot.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Deal-task custom field -> snapshot key. Contact Person is mapped straight to
-// custName per current data plan (real contact data will live there at runtime).
+// Deal-task custom field -> snapshot key.
+//
+// "Contact Person" is deliberately NOT mapped to custName: on the live deals list
+// that field holds an AI-written summary ("There is no information about a primary
+// contact..."), which landed as the customer name. Map it again only once the
+// contacts list is wired up and it holds a real name -- contactFieldMap below
+// already covers the contact task itself.
 const DEFAULT_FIELD_MAP = {
-  "contact person": "custName",
   "project size (kw)": "systemSizeKw",
   "system size (kw)": "systemSizeKw",
   "system size": "systemSizeKw",

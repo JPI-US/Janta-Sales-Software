@@ -134,6 +134,12 @@ export async function listTeamProposals(userOrKey, { status, userEmail } = {}) {
   }
 }
 
+/**
+ * Saves locally, then to the cloud. By default a cloud failure is swallowed and
+ * the local draft is returned, which keeps offline editing working. Callers that
+ * must know the server accepted the write (e.g. accepting a ClickUp project)
+ * pass requireCloud: true and get the error instead of a false success.
+ */
 export async function saveProposal({
   userId,
   id,
@@ -141,6 +147,7 @@ export async function saveProposal({
   snapshot,
   status = PROPOSAL_STATUS_IN_PROGRESS,
   userEmail,
+  requireCloud = false,
 }) {
   const accountKey = normalizeAccountKey(userId);
   if (!accountKey || !snapshot) throw new Error("account and snapshot are required");
@@ -173,7 +180,8 @@ export async function saveProposal({
     });
     upsertLocalProposal(accountKey, withAccountKey(saved, accountKey));
     return saved;
-  } catch {
+  } catch (err) {
+    if (requireCloud) throw err;
     return draft;
   }
 }
