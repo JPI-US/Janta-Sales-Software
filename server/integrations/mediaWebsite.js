@@ -1,148 +1,97 @@
+/**
+ * jantaus.com traffic for the Media Dashboard.
+ *
+ * Reads the local rollups written by server/analytics/collectGa4.mjs rather than
+ * calling a Google API at request time. Two reasons: BigQuery queries take
+ * seconds and scan billable bytes, so a dashboard that queried it per page load
+ * would be both slow and wasteful; and the local rollups keep history long past
+ * GA4's 14-month UI limit.
+ */
 import {
   MEDIA_CHANNEL_WEBSITE,
   MEDIA_CHANNEL_META,
   setupHintForChannel,
 } from "../../shared/mediaMetrics.js";
+import { datesInRange, aggregateRollups } from "../../shared/analyticsRollup.js";
+import { analyticsDir, readDaysInRange, readState } from "../analytics/rollupStore.js";
 
-function gaConfig() {
-  const propertyId = String(process.env.GA4_PROPERTY_ID || "").trim();
-  const token = String(process.env.GA4_ACCESS_TOKEN || "").trim();
-  if (!propertyId || !token) return null;
-  return { propertyId, token };
-}
+const meta = () => MEDIA_CHANNEL_META[MEDIA_CHANNEL_WEBSITE];
 
 export function isWebsiteConfigured() {
-  return Boolean(gaConfig());
+  return Boolean(
+    String(process.env.GA4_BQ_PROJECT_ID || "").trim() && String(process.env.GA4_BQ_DATASET || "").trim()
+  );
+}
+
+function baseChannel(extra = {}) {
+  const m = meta();
+  return {
+    key: MEDIA_CHANNEL_WEBSITE,
+    label: m.label,
+    provider: "Google Analytics 4 · BigQuery",
+    accent: m.accent,
+    configured: false,
+    live: false,
+    demo: false,
+    error: null,
+    kpis: [],
+    trend: [],
+    items: [],
+    setupHint: null,
+    ...extra,
+  };
+}
+
+function round(value, digits = 1) {
+  const factor = 10 ** digits;
+  return Math.round((Number(value) || 0) * factor) / factor;
 }
 
 export async function fetchWebsiteChannel({ from, to }) {
-  const meta = MEDIA_CHANNEL_META[MEDIA_CHANNEL_WEBSITE];
   if (!isWebsiteConfigured()) {
-    return {
-      key: MEDIA_CHANNEL_WEBSITE,
-      label: meta.label,
-      provider: meta.provider,
-      accent: meta.accent,
-      configured: false,
-      live: false,
-      demo: false,
-      error: null,
-      kpis: [],
-      trend: [],
-      items: [],
-      setupHint: setupHintForChannel(MEDIA_CHANNEL_WEBSITE),
-    };
+    return baseChannel({ setupHint: setupHintForChannel(MEDIA_CHANNEL_WEBSITE) });
   }
 
-  const { propertyId, token } = gaConfig();
-  const body = {
-    dateRanges: [{ startDate: from.slice(0, 10), endDate: to.slice(0, 10) }],
-    metrics: [
-      { name: "sessions" },
-      { name: "totalUsers" },
-      { name: "screenPageViews" },
-      { name: "bounceRate" },
-    ],
-    dimensions: [{ name: "date" }],
-  };
-
   try {
-    const res = await fetch(
-      `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      }
-    );
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      throw new Error(errBody || `GA4 request failed (${res.status})`);
-    }
-    const data = await res.json();
-    const rows = data?.rows || [];
-    let sessions = 0;
-    let users = 0;
-    let pageviews = 0;
-    let bounceSum = 0;
-    const trend = [];
+    const dir = analyticsDir();
+    const dates = datesInRange(from, to);
+    const days = readDaysInRange(dir, dates);
 
-    for (const row of rows) {
-      const dateRaw = row.dimensionValues?.[0]?.value || "";
-      const date =
-        dateRaw.length === 8
-          ? `${dateRaw.slice(0, 4)}-${dateRaw.slice(4, 6)}-${dateRaw.slice(6, 8)}`
-          : dateRaw;
-      const daySessions = Number(row.metricValues?.[0]?.value || 0);
-      sessions += daySessions;
-      users += Number(row.metricValues?.[1]?.value || 0);
-      pageviews += Number(row.metricValues?.[2]?.value || 0);
-      bounceSum += Number(row.metricValues?.[3]?.value || 0);
-      trend.push({ date, label: date.slice(5), value: daySessions });
+    if (!days.length) {
+      // Configured but nothing collected yet -- surface why rather than showing zeros.
+      const state = readState(dir);
+      const reason = state.lastError
+        ? `Last collection failed: ${state.lastError}`
+        : state.lastCollectedDate
+          ? `No data in this range. Collected up to ${state.lastCollectedDate}.`
+          : "Waiting for the first GA4 BigQuery export (about 24h after the tag goes live).";
+      return baseChannel({ configured: true, error: reason, setupHint: null });
     }
 
-    const bounceRate = rows.length ? (bounceSum / rows.length) * 100 : 0;
+    const summary = aggregateRollups(days);
+    const { totals } = summary;
 
-    const pagesBody = {
-      dateRanges: [{ startDate: from.slice(0, 10), endDate: to.slice(0, 10) }],
-      metrics: [{ name: "screenPageViews" }, { name: "averageSessionDuration" }],
-      dimensions: [{ name: "pagePath" }],
-      limit: 5,
-      orderBys: [{ metric: { metricName: "screenPageViews" }, desc: true }],
-    };
-    const pagesRes = await fetch(
-      `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(pagesBody),
-      }
-    );
-    const pagesData = pagesRes.ok ? await pagesRes.json() : { rows: [] };
-
-    return {
-      key: MEDIA_CHANNEL_WEBSITE,
-      label: meta.label,
-      provider: "Google Analytics 4",
-      accent: meta.accent,
+    return baseChannel({
       configured: true,
       live: true,
-      demo: false,
-      error: null,
       kpis: [
-        { key: "sessions", label: "Sessions", value: sessions },
-        { key: "users", label: "Users", value: users },
-        { key: "pageviews", label: "Pageviews", value: pageviews },
-        { key: "bounceRate", label: "Bounce rate", value: bounceRate, format: "percent" },
+        { key: "sessions", label: "Sessions", value: totals.sessions },
+        { key: "users", label: "Users", value: totals.users },
+        { key: "pageviews", label: "Pageviews", value: totals.pageviews },
+        { key: "bounceRate", label: "Bounce rate", value: round(totals.bounceRate), format: "percent" },
       ],
-      trend,
-      items: (pagesData.rows || []).map((row) => ({
-        title: row.dimensionValues?.[0]?.value || "/",
-        metric: `${Number(row.metricValues?.[0]?.value || 0).toLocaleString()} views`,
-        secondary: `${Math.round(Number(row.metricValues?.[1]?.value || 0))}s avg`,
+      trend: summary.trend,
+      items: summary.pages.map((page) => ({
+        title: page.path,
+        metric: `${page.views.toLocaleString()} views`,
+        secondary: `${Math.round(page.avgEngagementSeconds)}s avg`,
       })),
-      setupHint: null,
-    };
+    });
   } catch (err) {
-    return {
-      key: MEDIA_CHANNEL_WEBSITE,
-      label: meta.label,
-      provider: meta.provider,
-      accent: meta.accent,
+    return baseChannel({
       configured: true,
-      live: false,
-      demo: false,
-      error: err.message || "Could not load GA4 data",
-      kpis: [],
-      trend: [],
-      items: [],
+      error: err.message || "Could not read website analytics",
       setupHint: setupHintForChannel(MEDIA_CHANNEL_WEBSITE),
-    };
+    });
   }
 }

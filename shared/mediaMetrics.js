@@ -181,7 +181,7 @@ export function buildDemoChannel(channelKey, period) {
 export function setupHintForChannel(channelKey) {
   const hints = {
     [MEDIA_CHANNEL_EMAIL]: "Set MAILCHIMP_API_KEY and MAILCHIMP_SERVER_PREFIX in .env",
-    [MEDIA_CHANNEL_WEBSITE]: "Set GA4_PROPERTY_ID and GA4_ACCESS_TOKEN in .env",
+    [MEDIA_CHANNEL_WEBSITE]: "Set GA4_BQ_PROJECT_ID, GA4_BQ_DATASET and GOOGLE_APPLICATION_CREDENTIALS, then run server/analytics/collectGa4.mjs",
     [MEDIA_CHANNEL_INSTAGRAM]: "Set META_ACCESS_TOKEN and META_IG_ACCOUNT_ID in .env",
     [MEDIA_CHANNEL_LINKEDIN]: "Set LINKEDIN_ACCESS_TOKEN and LINKEDIN_ORG_ID in .env",
   };
